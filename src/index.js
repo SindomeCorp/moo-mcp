@@ -18,6 +18,8 @@ const DONE_MARKER = "### Done ###";
 const LIST_TIMEOUT_MS = 15000;
 const LOGIN_TIMEOUT_MS = 10000;
 const LOGIN_IDLE_MS = 500;
+const KEEP_ALIVE_INTERVAL_MS = 5 * 60 * 1000;
+const KEEP_ALIVE_TEXT = "#$# Ping!";
 const DEFAULT_IDLE_CAPTURE_MS = 1000;
 const DEFAULT_FIRST_RESPONSE_TIMEOUT_MS = 2000;
 const DEFAULT_GREP_TIMEOUT_MS = 120000;
@@ -154,6 +156,7 @@ class MooTelnetSession {
     this.pending = null;
     this.buffer = "";
     this.commandQueue = Promise.resolve();
+    this.keepAliveTimer = null;
   }
 
   async connectAndLogin() {
@@ -171,6 +174,7 @@ class MooTelnetSession {
       const wasConnected = this.connected;
       this.connected = false;
       this.loggedIn = false;
+      this.stopKeepAlive();
 
       if (wasConnected) {
         this.logger.error("MOO connection closed", { event: "moo_connection_closed" });
@@ -199,7 +203,39 @@ class MooTelnetSession {
     }
 
     this.loggedIn = true;
+    this.startKeepAlive();
     this.logger.info("Logged into MOO", { event: "moo_logged_in", user: this.username });
+  }
+
+  startKeepAlive() {
+    this.stopKeepAlive();
+
+    this.keepAliveTimer = setInterval(() => {
+      if (!this.socket || !this.connected || !this.loggedIn || this.pending) {
+        return;
+      }
+
+      this.socket.write(`${KEEP_ALIVE_TEXT}\n`, (error) => {
+        if (error) {
+          this.logger.warn("Failed to send MOO keep alive", {
+            event: "moo_keep_alive_failed",
+            error: error.message
+          });
+          return;
+        }
+
+        this.logger.debug("MOO keep alive sent", { event: "moo_keep_alive_sent" });
+      });
+    }, KEEP_ALIVE_INTERVAL_MS);
+  }
+
+  stopKeepAlive() {
+    if (!this.keepAliveTimer) {
+      return;
+    }
+
+    clearInterval(this.keepAliveTimer);
+    this.keepAliveTimer = null;
   }
 
   onData(bufferChunk) {
@@ -480,6 +516,8 @@ class MooTelnetSession {
   }
 
   close() {
+    this.stopKeepAlive();
+
     if (this.socket) {
       this.socket.end();
       this.socket.destroy();
@@ -503,6 +541,18 @@ function buildErrorResult(reason, rawOutput, objectRef, verbName) {
 
 function parseVerbListing(rawOutput, objectRef, verbName) {
   const normalized = rawOutput.replace(/\r\n/g, "\n").trim();
+  const permissionDeniedMatch = normalized.match(
+    /(?:^|\n)([^:\n]+:[^\n]+)\s+--\s+Permission denied\s*$/i
+  );
+  if (permissionDeniedMatch) {
+    return buildErrorResult(
+      `Permission denied listing ${permissionDeniedMatch[1]}.`,
+      rawOutput,
+      objectRef,
+      verbName
+    );
+  }
+
   const lines = normalized.split("\n");
   const signaturePattern =
     /^(\$[A-Za-z0-9_]+|#\d+):(?:"([^"]+)"|([^\s]+))\s*(.*)$/;
@@ -551,8 +601,20 @@ function parseEvalOutput(rawOutput, evalCommand) {
   const normalized = rawOutput.replace(/\r\n/g, "\n").trim();
   const lines = normalized.split("\n");
   const returnIndex = lines.findLastIndex((line) => line.trim().length > 0);
+  const syntaxErrorMatch = normalized.match(
+    /(?:^|\n)((?:Line\s+\d+:\s+[^\n]*\n)+\d+\s+error(?:s)?\.)\s*$/i
+  );
 
   if (returnIndex === -1 || !/^\s*=>/.test(lines[returnIndex])) {
+    if (syntaxErrorMatch) {
+      return {
+        error: true,
+        reason: syntaxErrorMatch[1],
+        eval: evalCommand,
+        raw_output: rawOutput
+      };
+    }
+
     return {
       error: true,
       reason: "Unexpected eval response format (missing final return line).",
@@ -1138,8 +1200,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const output = await mooSession.runCommandUntil(
       evalCommand,
       (buffer) => {
+        const normalized = buffer.replace(/\r\n/g, "\n");
         const match = /(^|\r?\n)(\s*=>[^\r\n]*)(\r?\n|$)/m.exec(buffer);
         if (!match) {
+          if (
+            /(?:^|\n)(?:Line\s+\d+:\s+[^\n]*\n)+\d+\s+error(?:s)?\.\s*$/i.test(normalized)
+          ) {
+            return { done: true };
+          }
           return { done: false };
         }
 
