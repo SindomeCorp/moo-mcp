@@ -541,6 +541,18 @@ function buildErrorResult(reason, rawOutput, objectRef, verbName) {
 
 function parseVerbListing(rawOutput, objectRef, verbName) {
   const normalized = rawOutput.replace(/\r\n/g, "\n").trim();
+  const missingVerbMatch = normalized.match(
+    /(?:^|\n)(That object does not define that verb\.)\s*$/i
+  );
+  if (missingVerbMatch) {
+    return buildErrorResult(
+      missingVerbMatch[1],
+      rawOutput,
+      objectRef,
+      verbName
+    );
+  }
+
   const permissionDeniedMatch = normalized.match(
     /(?:^|\n)([^:\n]+:[^\n]+)\s+--\s+Permission denied\s*$/i
   );
@@ -599,6 +611,18 @@ function parseVerbListing(rawOutput, objectRef, verbName) {
 
 function parseEvalOutput(rawOutput, evalCommand) {
   const normalized = rawOutput.replace(/\r\n/g, "\n").trim();
+  const exceptionMatch = normalized.match(
+    /(?:^|\n)(You had an exception:\s+.+)\s*$/i
+  );
+  if (exceptionMatch) {
+    return {
+      error: true,
+      reason: exceptionMatch[1],
+      eval: evalCommand,
+      raw_output: rawOutput
+    };
+  }
+
   const lines = normalized.split("\n");
   const returnIndex = lines.findLastIndex((line) => line.trim().length > 0);
   const syntaxErrorMatch = normalized.match(
