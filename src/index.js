@@ -611,6 +611,16 @@ function parseVerbListing(rawOutput, objectRef, verbName) {
 
 function parseEvalOutput(rawOutput, evalCommand) {
   const normalized = rawOutput.replace(/\r\n/g, "\n").trim();
+  const compilerErrorMatch = normalized.match(/[\s\S]*\n\d+\s+error(?:s)?\.\s*$/i);
+  if (compilerErrorMatch) {
+    return {
+      error: true,
+      reason: normalized,
+      eval: evalCommand,
+      raw_output: rawOutput
+    };
+  }
+
   const exceptionMatch = normalized.match(
     /(?:^|\n)(You had an exception:\s+.+)\s*$/i
   );
