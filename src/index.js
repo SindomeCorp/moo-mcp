@@ -22,7 +22,7 @@ const KEEP_ALIVE_INTERVAL_MS = 5 * 60 * 1000;
 const KEEP_ALIVE_TEXT = "#$# Ping!";
 const DEFAULT_IDLE_CAPTURE_MS = 1000;
 const DEFAULT_FIRST_RESPONSE_TIMEOUT_MS = 2000;
-const DEFAULT_GREP_TIMEOUT_MS = 120000;
+const DEFAULT_GREP_TIMEOUT_MS = 30000;
 
 function readEnv(keys) {
   for (const key of keys) {
