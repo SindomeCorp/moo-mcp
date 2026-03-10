@@ -724,6 +724,62 @@ function parseGrepOutput(rawOutput, grepText) {
   };
 }
 
+function parseVerbInfoOutput(rawOutput, arg) {
+  const normalized = rawOutput.replace(/\r\n/g, "\n").trim();
+  let parsed;
+
+  try {
+    parsed = JSON.parse(normalized);
+  } catch {
+    return {
+      error: true,
+      reason: "Got back invalid JSON from the MOO.",
+      arg,
+      raw_output: rawOutput
+    };
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      error: true,
+      reason: "Got back invalid JSON from the MOO (expected a JSON object).",
+      arg,
+      raw_output: rawOutput
+    };
+  }
+
+  const source = parsed.source;
+  if (source && typeof source === "object" && !Array.isArray(source)) {
+    const codeLines = source.code_lines;
+    if (Array.isArray(codeLines) && codeLines.every((line) => typeof line === "string")) {
+      source.code = codeLines.join("\n");
+    }
+  }
+
+  return {
+    error: false,
+    arg,
+    verb_info: parsed
+  };
+}
+
+function validateVerbInfoArg(rawArg) {
+  const arg = String(rawArg ?? "").trim();
+  const usage =
+    "Usage: `obj:verbname` where obj is `#1234` or `$cored_ref` and verbname uses letters/underscores.";
+
+  if (!arg) {
+    throw new Error(`\`arg\` must be a non-empty string. ${usage}`);
+  }
+
+  const pattern = /^(\$[A-Za-z0-9_]+|#\d+):([A-Za-z_]+)$/;
+  if (!pattern.test(arg)) {
+    throw new Error(`Invalid \`arg\`. ${usage}`);
+  }
+
+  return arg;
+}
+
 function validateInput(args) {
   const objectRef = String(args?.object ?? "").trim();
   const verbName = String(args?.verb ?? "").trim();
@@ -784,6 +840,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "verb-data",
+        description:
+          "Runs @verb-data <arg> where arg is obj:verbname (for example `#1234:look` or `$string_utils:trim`), parses JSON response, and enriches source.code from source.code_lines when available.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            arg: {
+              type: "string",
+              description:
+                "Required format: `obj:verbname` where obj is `#1234` or `$cored_ref`, and verbname uses letters/underscores (e.g. `#22664:foo` or `$string_utils:trim`)."
+            }
+          },
+          required: ["arg"],
+          additionalProperties: false
+        }
+      },
+      {
         name: "run_moo_eval",
         description:
           "Runs an eval expression on the MOO (for example `;parent(#22664)`) and returns body + return value.",
@@ -838,6 +911,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (
     request.params.name !== "get_moo_verb_source" &&
+    request.params.name !== "verb-data" &&
     request.params.name !== "run_moo_eval" &&
     request.params.name !== "run_moo_command" &&
     request.params.name !== "run_moo_grep"
@@ -939,6 +1013,114 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       });
 
       const result = buildErrorResult(error.message, "", objectRef, verbName);
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "verb-data") {
+    let arg;
+    try {
+      arg = validateVerbInfoArg(request.params.arguments?.arg);
+    } catch (error) {
+      const result = {
+        error: true,
+        reason: error.message,
+        arg: String(request.params.arguments?.arg ?? "").trim(),
+        raw_output: ""
+      };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    logger.info("MOO verb info requested", {
+      event: "tool_verb_info_request",
+      requestId,
+      arg
+    });
+
+    if (!mooSession.connected || !mooSession.loggedIn) {
+      const result = {
+        error: true,
+        reason: "MOO session is not logged in.",
+        arg,
+        raw_output: ""
+      };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_verb_info_not_logged_in",
+        requestId,
+        arg
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const captured = await mooSession.runCommandCaptureUntilIdle(
+        `@verb-data ${arg}`,
+        config.idleCaptureMs,
+        config.firstResponseTimeoutMs
+      );
+      const parsed = parseVerbInfoOutput(captured.output, arg);
+
+      if (parsed.error) {
+        logger.error("Failed to parse @verb-data output", {
+          event: "tool_verb_info_parse_error",
+          requestId,
+          arg
+        });
+      } else {
+        logger.info("Successfully executed @verb-data", {
+          event: "tool_verb_info_success",
+          requestId,
+          arg
+        });
+      }
+
+      return {
+        isError: Boolean(parsed.error),
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(parsed, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("@verb-data execution failed", {
+        event: "tool_verb_info_execution_error",
+        requestId,
+        arg,
+        error: error.message
+      });
+
+      const result = {
+        error: true,
+        reason: error.message,
+        arg,
+        raw_output: ""
+      };
       return {
         isError: true,
         content: [
