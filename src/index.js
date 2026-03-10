@@ -22,6 +22,7 @@ const KEEP_ALIVE_INTERVAL_MS = 5 * 60 * 1000;
 const KEEP_ALIVE_TEXT = "#$# Ping!";
 const DEFAULT_IDLE_CAPTURE_MS = 1000;
 const DEFAULT_FIRST_RESPONSE_TIMEOUT_MS = 2000;
+const DEFAULT_CODE_SEARCH_TIMEOUT_MS = 15000;
 const DEFAULT_GREP_TIMEOUT_MS = 30000;
 
 function readEnv(keys) {
@@ -47,6 +48,10 @@ const config = {
       "moo-first-response-timeout-ms",
       "MOO_FIRST_RESPONSE_TIMEOUT_MS"
     ]) ?? DEFAULT_FIRST_RESPONSE_TIMEOUT_MS
+  ),
+  codeSearchTimeoutMs: Number(
+    readEnv(["moo-code-search-timeout-ms", "MOO_CODE_SEARCH_TIMEOUT_MS"]) ??
+      DEFAULT_CODE_SEARCH_TIMEOUT_MS
   ),
   grepTimeoutMs: Number(
     readEnv(["moo-grep-timeout-ms", "MOO_GREP_TIMEOUT_MS"]) ?? DEFAULT_GREP_TIMEOUT_MS
@@ -81,6 +86,12 @@ if (
 ) {
   throw new Error(
     "Invalid first response timeout. Set moo-first-response-timeout-ms (or MOO_FIRST_RESPONSE_TIMEOUT_MS) to a positive number."
+  );
+}
+
+if (!Number.isFinite(config.codeSearchTimeoutMs) || config.codeSearchTimeoutMs <= 0) {
+  throw new Error(
+    "Invalid code-search timeout. Set moo-code-search-timeout-ms (or MOO_CODE_SEARCH_TIMEOUT_MS) to a positive number."
   );
 }
 
@@ -903,6 +914,46 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["text"],
           additionalProperties: false
         }
+      },
+      {
+        name: "run_moo_code_search",
+        description:
+          "Runs @code-search <pattern> on the MOO (optionally with --scope), converts the response to a JSON object, and returns it as `value`.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            pattern: {
+              type: "string",
+              description: "Pattern text to search with @code-search."
+            },
+            scope: {
+              type: "string",
+              description: "Optional scope target like `#98` or `$su`, sent as `--scope=<value>`."
+            },
+            include_descendants: {
+              type: "boolean",
+              description:
+                "Optional flag; only accepted value is `true`, and it can only be used with `scope`."
+            },
+            max_matches: {
+              type: "integer",
+              description:
+                "Optional maximum match count. Must be an integer greater than 0; sent as `--max_matches=<integer>`."
+            },
+            count_only: {
+              type: "boolean",
+              description:
+                "Optional flag; only accepted value is `true`, sent as `--count_only=true`."
+            },
+            match_type: {
+              type: "string",
+              description:
+                "Optional match type. Allowed values: `simple` (default) or `regex`; sent as `--match_type=<value>`."
+            }
+          },
+          required: ["pattern"],
+          additionalProperties: false
+        }
       }
     ]
   };
@@ -914,7 +965,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     request.params.name !== "verb-data" &&
     request.params.name !== "run_moo_eval" &&
     request.params.name !== "run_moo_command" &&
-    request.params.name !== "run_moo_grep"
+    request.params.name !== "run_moo_grep" &&
+    request.params.name !== "run_moo_code_search"
   ) {
     throw new Error(`Unknown tool: ${request.params.name}`);
   }
@@ -1350,6 +1402,279 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         query: grepText,
         raw_output: ""
       };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "run_moo_code_search") {
+    const pattern = String(request.params.arguments?.pattern ?? "").trim();
+    const scopeRaw = request.params.arguments?.scope;
+    const scope = scopeRaw == null ? "" : String(scopeRaw).trim();
+    const includeDescendantsRaw = request.params.arguments?.include_descendants;
+    const includeDescendants = includeDescendantsRaw === true;
+    const maxMatchesRaw = request.params.arguments?.max_matches;
+    const hasMaxMatches = maxMatchesRaw !== undefined;
+    const maxMatches = Number(maxMatchesRaw);
+    const countOnlyRaw = request.params.arguments?.count_only;
+    const countOnly = countOnlyRaw === true;
+    const matchTypeRaw = request.params.arguments?.match_type;
+    const matchType = String(matchTypeRaw ?? "simple").trim().toLowerCase();
+
+    if (!pattern) {
+      const result = {
+        error: "`pattern` must be a non-empty string."
+      };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    if (includeDescendantsRaw !== undefined && includeDescendantsRaw !== true) {
+      const result = {
+        error: "`include_descendants` only accepts the value `true`."
+      };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    if (includeDescendants && !scope) {
+      const result = {
+        error: "option can only be used in conjunction with --scope"
+      };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    if (scope && !/^(\$[A-Za-z0-9_]+|#\d+)$/.test(scope)) {
+      const result = {
+        error: "`scope` must look like `#98` or `$su`."
+      };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    if (
+      hasMaxMatches &&
+      (!Number.isInteger(maxMatches) || maxMatches <= 0)
+    ) {
+      const result = {
+        error: "`max_matches` must be an integer greater than 0."
+      };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    if (countOnlyRaw !== undefined && countOnlyRaw !== true) {
+      const result = {
+        error: "count_only only accepts a boolean true for the argument."
+      };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    if (matchType !== "simple" && matchType !== "regex") {
+      const result = {
+        error: "`match_type` must be either `simple` or `regex`."
+      };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    logger.info("MOO code-search requested", {
+      event: "tool_code_search_request",
+      requestId,
+      pattern,
+      scope: scope || undefined,
+      includeDescendants,
+      maxMatches: hasMaxMatches ? maxMatches : undefined,
+      countOnly,
+      matchType
+    });
+
+    if (!mooSession.connected || !mooSession.loggedIn) {
+      const result = {
+        error: "MOO session is not logged in."
+      };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_code_search_not_logged_in",
+        requestId,
+        pattern,
+        scope: scope || undefined,
+        includeDescendants,
+        maxMatches: hasMaxMatches ? maxMatches : undefined,
+        countOnly,
+        matchType
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      let command = `@code-search ${JSON.stringify(pattern)}`;
+      if (scope) {
+        command += ` --scope=${scope}`;
+      }
+      if (includeDescendants) {
+        command += " --include_descendants=true";
+      }
+      if (hasMaxMatches) {
+        command += ` --max_matches=${maxMatches}`;
+      }
+      if (countOnly) {
+        command += " --count_only=true";
+      }
+      command += ` --match_type=${matchType}`;
+      const captured = await mooSession.runCommandCaptureUntilIdle(
+        command,
+        config.idleCaptureMs,
+        config.codeSearchTimeoutMs
+      );
+
+      let parsed;
+      try {
+        parsed = JSON.parse(captured.output);
+      } catch {
+        const result = { error: "unable to convert result to json" };
+        logger.error("Failed to parse @code-search output", {
+          event: "tool_code_search_parse_error",
+          requestId,
+          pattern,
+          scope: scope || undefined,
+          includeDescendants,
+          maxMatches: hasMaxMatches ? maxMatches : undefined,
+          countOnly,
+          matchType
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        const result = { error: "unable to convert result to json" };
+        logger.error("Invalid @code-search JSON type", {
+          event: "tool_code_search_parse_error",
+          requestId,
+          pattern,
+          scope: scope || undefined,
+          includeDescendants,
+          maxMatches: hasMaxMatches ? maxMatches : undefined,
+          countOnly,
+          matchType
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      logger.info("Successfully executed @code-search", {
+        event: "tool_code_search_success",
+        requestId,
+        pattern,
+        scope: scope || undefined,
+        includeDescendants,
+        maxMatches: hasMaxMatches ? maxMatches : undefined,
+        countOnly,
+        matchType
+      });
+
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ value: parsed }, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("@code-search execution failed", {
+        event: "tool_code_search_execution_error",
+        requestId,
+        pattern,
+        scope: scope || undefined,
+        includeDescendants,
+        maxMatches: hasMaxMatches ? maxMatches : undefined,
+        countOnly,
+        matchType,
+        error: error.message
+      });
+      const result = { error: error.message };
       return {
         isError: true,
         content: [
