@@ -746,6 +746,7 @@ function parseVerbInfoOutput(rawOutput, arg) {
       error: true,
       reason: "Got back invalid JSON from the MOO.",
       arg,
+      truncated_response: truncateResponse(rawOutput),
       raw_output: rawOutput
     };
   }
@@ -755,6 +756,7 @@ function parseVerbInfoOutput(rawOutput, arg) {
       error: true,
       reason: "Got back invalid JSON from the MOO (expected a JSON object).",
       arg,
+      truncated_response: truncateResponse(rawOutput),
       raw_output: rawOutput
     };
   }
@@ -774,18 +776,53 @@ function parseVerbInfoOutput(rawOutput, arg) {
   };
 }
 
+function truncateResponse(rawOutput) {
+  return String(rawOutput ?? "").slice(0, 500);
+}
+
+function parseJsonObjectOutput(rawOutput) {
+  const normalized = rawOutput.replace(/\r\n/g, "\n").trim();
+  let parsed;
+
+  try {
+    parsed = JSON.parse(normalized);
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+
+  return parsed;
+}
+
 function validateVerbInfoArg(rawArg) {
   const arg = String(rawArg ?? "").trim();
   const usage =
-    "Usage: `obj:verbname` where obj is `#1234` or `$cored_ref` and verbname uses letters/underscores.";
+    "Usage: `obj:verb_spec` where obj is `#1234` or `$cored_ref`, separator is `:` or `::`, and verb_spec uses letters/underscores with optional `*` (for example `#24608:outgoing_bridges`, `#24608:send_*`, `#24608::outgoing_bridges`).";
 
   if (!arg) {
     throw new Error(`\`arg\` must be a non-empty string. ${usage}`);
   }
 
-  const pattern = /^(\$[A-Za-z0-9_]+|#\d+):([A-Za-z_]+)$/;
+  const pattern = /^(\$[A-Za-z0-9_]+|#\d+)::?([A-Za-z_][A-Za-z0-9_*]*)$/;
   if (!pattern.test(arg)) {
     throw new Error(`Invalid \`arg\`. ${usage}`);
+  }
+
+  return arg;
+}
+
+function validateObjectRefArg(rawArg) {
+  const arg = String(rawArg ?? "").trim();
+
+  if (!arg) {
+    throw new Error("`arg` must be a non-empty string.");
+  }
+
+  if (!/^(\$[A-Za-z0-9_]+|#\d+)$/.test(arg)) {
+    throw new Error("`arg` must be a cored reference like `$string_utils` or object id like `#1234`.");
   }
 
   return arg;
@@ -853,14 +890,48 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "verb-data",
         description:
-          "Runs @verb-data <arg> where arg is obj:verbname (for example `#1234:look` or `$string_utils:trim`), parses JSON response, and enriches source.code from source.code_lines when available.",
+          "Runs @verb-data <arg> where arg is obj:verb_spec (for example `#1234:look`, `#24608:send_*`, or `#24608::outgoing_bridges`), parses JSON response, and enriches source.code from source.code_lines when available.",
         inputSchema: {
           type: "object",
           properties: {
             arg: {
               type: "string",
               description:
-                "Required format: `obj:verbname` where obj is `#1234` or `$cored_ref`, and verbname uses letters/underscores (e.g. `#22664:foo` or `$string_utils:trim`)."
+                "Required format: `obj:verb_spec` where obj is `#1234` or `$cored_ref`, separator is `:` or `::`, and verb_spec uses letters/underscores with optional `*` (e.g. `#22664:foo`, `#24608:send_*`, or `#24608::outgoing_bridges`)."
+            }
+          },
+          required: ["arg"],
+          additionalProperties: false
+        }
+      },
+      {
+        name: "verbs-json",
+        description:
+          "Runs @verbs-json <arg> where arg is `#1234` or `$cored_ref`, and returns the parsed JSON object.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            arg: {
+              type: "string",
+              description:
+                "Object reference in the format `#1234` or `$cored_ref` (for example `#15840` or `$string_utils`)."
+            }
+          },
+          required: ["arg"],
+          additionalProperties: false
+        }
+      },
+      {
+        name: "props-json",
+        description:
+          "Runs @props-json <arg> where arg is `#1234` or `$cored_ref`, and returns the parsed JSON object.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            arg: {
+              type: "string",
+              description:
+                "Object reference in the format `#1234` or `$cored_ref` (for example `#15840` or `$string_utils`)."
             }
           },
           required: ["arg"],
@@ -954,6 +1025,46 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["pattern"],
           additionalProperties: false
         }
+      },
+      {
+        name: "prop-search",
+        description:
+          "Runs @prop-grep-json <pattern> on the MOO with required --scope and the same options as run_moo_code_search, converts the response to a JSON object, and returns it as `value`.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            pattern: {
+              type: "string",
+              description: "Pattern text to search with @prop-grep-json."
+            },
+            scope: {
+              type: "string",
+              description: "Required scope target like `#98` or `$su`, sent as `--scope=<value>`."
+            },
+            include_descendants: {
+              type: "boolean",
+              description:
+                "Optional flag; only accepted value is `true`, and it can only be used with `scope`."
+            },
+            max_matches: {
+              type: "integer",
+              description:
+                "Optional maximum match count. Must be an integer greater than 0; sent as `--max_matches=<integer>`."
+            },
+            count_only: {
+              type: "boolean",
+              description:
+                "Optional flag; only accepted value is `true`, sent as `--count_only=true`."
+            },
+            match_type: {
+              type: "string",
+              description:
+                "Optional match type. Allowed values: `simple` (default) or `regex`; sent as `--match_type=<value>`."
+            }
+          },
+          required: ["pattern", "scope"],
+          additionalProperties: false
+        }
       }
     ]
   };
@@ -963,10 +1074,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (
     request.params.name !== "get_moo_verb_source" &&
     request.params.name !== "verb-data" &&
+    request.params.name !== "verbs-json" &&
+    request.params.name !== "props-json" &&
     request.params.name !== "run_moo_eval" &&
     request.params.name !== "run_moo_command" &&
     request.params.name !== "run_moo_grep" &&
-    request.params.name !== "run_moo_code_search"
+    request.params.name !== "run_moo_code_search" &&
+    request.params.name !== "prop-search"
   ) {
     throw new Error(`Unknown tool: ${request.params.name}`);
   }
@@ -1173,6 +1287,118 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         arg,
         raw_output: ""
       };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "verbs-json" || request.params.name === "props-json") {
+    let arg;
+    try {
+      arg = validateObjectRefArg(request.params.arguments?.arg);
+    } catch (error) {
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const commandName = request.params.name;
+    const command = commandName === "verbs-json" ? `@verbs-json ${arg}` : `@props-json ${arg}`;
+
+    logger.info("MOO object JSON requested", {
+      event: "tool_object_json_request",
+      requestId,
+      commandName,
+      arg
+    });
+
+    if (!mooSession.connected || !mooSession.loggedIn) {
+      const result = { error: "MOO session is not logged in." };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_object_json_not_logged_in",
+        requestId,
+        commandName,
+        arg
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const captured = await mooSession.runCommandCaptureUntilIdle(
+        command,
+        config.idleCaptureMs,
+        config.firstResponseTimeoutMs
+      );
+      const parsed = parseJsonObjectOutput(captured.output);
+      if (!parsed) {
+        const result = {
+          error: "unable to parse result into json",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error("Failed to parse object JSON output", {
+          event: "tool_object_json_parse_error",
+          requestId,
+          commandName,
+          arg
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      logger.info("Successfully executed object JSON command", {
+        event: "tool_object_json_success",
+        requestId,
+        commandName,
+        arg
+      });
+
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(parsed, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("Object JSON command execution failed", {
+        event: "tool_object_json_execution_error",
+        requestId,
+        commandName,
+        arg,
+        error: error.message
+      });
+      const result = { error: error.message };
       return {
         isError: true,
         content: [
@@ -1414,7 +1640,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
-  if (request.params.name === "run_moo_code_search") {
+  if (request.params.name === "run_moo_code_search" || request.params.name === "prop-search") {
+    const isPropSearch = request.params.name === "prop-search";
+    const toolName = isPropSearch ? "prop-search" : "code-search";
+    const commandName = isPropSearch ? "@prop-grep-json" : "@code-search";
+    const eventPrefix = isPropSearch ? "tool_prop_search" : "tool_code_search";
     const pattern = String(request.params.arguments?.pattern ?? "").trim();
     const scopeRaw = request.params.arguments?.scope;
     const scope = scopeRaw == null ? "" : String(scopeRaw).trim();
@@ -1431,6 +1661,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (!pattern) {
       const result = {
         error: "`pattern` must be a non-empty string."
+      };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    if (isPropSearch && !scope) {
+      const result = {
+        error: "`scope` must be a non-empty string."
       };
       return {
         isError: true,
@@ -1536,8 +1781,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    logger.info("MOO code-search requested", {
-      event: "tool_code_search_request",
+    logger.info(`MOO ${toolName} requested`, {
+      event: `${eventPrefix}_request`,
       requestId,
       pattern,
       scope: scope || undefined,
@@ -1552,7 +1797,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         error: "MOO session is not logged in."
       };
       logger.error("MOO session is not logged in.", {
-        event: "tool_code_search_not_logged_in",
+        event: `${eventPrefix}_not_logged_in`,
         requestId,
         pattern,
         scope: scope || undefined,
@@ -1573,7 +1818,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     try {
-      let command = `@code-search ${JSON.stringify(pattern)}`;
+      let command = `${commandName} ${JSON.stringify(pattern)}`;
       if (scope) {
         command += ` --scope=${scope}`;
       }
@@ -1597,9 +1842,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         parsed = JSON.parse(captured.output);
       } catch {
-        const result = { error: "unable to convert result to json" };
-        logger.error("Failed to parse @code-search output", {
-          event: "tool_code_search_parse_error",
+        const result = {
+          error: "unable to convert result to json",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error(`Failed to parse ${commandName} output`, {
+          event: `${eventPrefix}_parse_error`,
           requestId,
           pattern,
           scope: scope || undefined,
@@ -1620,9 +1868,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        const result = { error: "unable to convert result to json" };
-        logger.error("Invalid @code-search JSON type", {
-          event: "tool_code_search_parse_error",
+        const result = {
+          error: "unable to convert result to json",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error(`Invalid ${commandName} JSON type`, {
+          event: `${eventPrefix}_parse_error`,
           requestId,
           pattern,
           scope: scope || undefined,
@@ -1642,8 +1893,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      logger.info("Successfully executed @code-search", {
-        event: "tool_code_search_success",
+      logger.info(`Successfully executed ${commandName}`, {
+        event: `${eventPrefix}_success`,
         requestId,
         pattern,
         scope: scope || undefined,
@@ -1663,8 +1914,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ]
       };
     } catch (error) {
-      logger.error("@code-search execution failed", {
-        event: "tool_code_search_execution_error",
+      logger.error(`${commandName} execution failed`, {
+        event: `${eventPrefix}_execution_error`,
         requestId,
         pattern,
         scope: scope || undefined,
