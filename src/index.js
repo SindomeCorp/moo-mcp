@@ -812,8 +812,12 @@ function validateVerbInfoArg(rawArg) {
 function sanitizeJsonText(rawOutput) {
   const ansiPattern =
     /(?:\u001B\[|\u009B)[0-?]*[ -/]*[@-~]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g;
+  const escParenTerminalCodePattern = /\u001B\([^)]*\)/g;
+  const escapedEscParenTerminalCodePattern = /\\+u001[bB]\([^)]*\)/g;
+  const danglingEscParenTerminalCodePattern = /\u001B\([^\r\n]*/g;
+  const danglingEscapedEscParenTerminalCodePattern = /\\+u001[bB]\([^\r\n]*/g;
   const brokenColorFragmentPattern =
-    /(?:\u001B\[|\u009B|\[)\d{1,3}(?:[;:]\d{1,3})*[A-Za-z]?/g;
+    /(?:\u001B\[|\u009B)\d{1,3}(?:[;:]\d{1,3})*[A-Za-z]?/g;
   const webclientColorTagPattern = /\(\d{3}\|\d{3}\|[0-9A-Za-z]{7}\)/g;
 
   let text = String(rawOutput ?? "").replace(/\r\n/g, "\n");
@@ -823,6 +827,10 @@ function sanitizeJsonText(rawOutput) {
     previous = text;
     text = text
       .replace(ansiPattern, "")
+      .replace(escParenTerminalCodePattern, "")
+      .replace(escapedEscParenTerminalCodePattern, "")
+      .replace(danglingEscParenTerminalCodePattern, "")
+      .replace(danglingEscapedEscParenTerminalCodePattern, "")
       .replace(brokenColorFragmentPattern, "")
       .replace(webclientColorTagPattern, "")
       .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
@@ -1569,7 +1577,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       if (!parsed) {
         const result = {
-          error: "unable to parse result into json"
+          error: "unable to parse result into json",
+          message: sanitizeJsonText(captured.output)
         };
         logger.error("Failed to parse @show-json output", {
           event: "tool_show_json_parse_error",
