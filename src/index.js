@@ -441,6 +441,59 @@ class MooTelnetSession {
     });
   }
 
+  async runCommandCaptureFragmentsUntilIdle(command, idleMs, firstResponseTimeoutMs) {
+    return this.enqueue(async () => {
+      if (!this.socket || !this.connected) {
+        throw new Error("MOO connection is not open.");
+      }
+
+      this.buffer = "";
+      this.sendLine(command);
+
+      const start = Date.now();
+      let lastChangeAt = start;
+      let started = false;
+      let seenLength = this.buffer.length;
+      const fragments = [];
+
+      while (true) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, 50);
+        });
+
+        const now = Date.now();
+        const currentLength = this.buffer.length;
+
+        if (currentLength !== seenLength) {
+          const rawFragment = this.buffer.slice(seenLength, currentLength);
+          const nextFragment = rawFragment
+            .replace(/(?:\r?\n)+$/g, "");
+          fragments.push(nextFragment);
+          seenLength = currentLength;
+          lastChangeAt = now;
+          if (currentLength > 0) {
+            started = true;
+          }
+        }
+
+        if (!started && now - start >= firstResponseTimeoutMs) {
+          return {
+            output: "",
+            timed_out_waiting_for_first_line: true
+          };
+        }
+
+        if (started && now - lastChangeAt >= idleMs) {
+          this.buffer = "";
+          return {
+            output: fragments.join(""),
+            timed_out_waiting_for_first_line: false
+          };
+        }
+      }
+    });
+  }
+
   enqueue(work) {
     this.commandQueue = this.commandQueue.then(work, work);
     return this.commandQueue;
@@ -874,6 +927,62 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "contents",
+        description:
+          "Runs @contents <arg> where arg is `#1234` or `$cored_ref`, and returns the parsed JSON object.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            arg: {
+              type: "string",
+              description:
+                "Object reference in the format `#1234` or `$cored_ref` (for example `#15840` or `$string_utils`)."
+            }
+          },
+          required: ["arg"],
+          additionalProperties: false
+        }
+      },
+      {
+        name: "location",
+        description:
+          "Runs @location-json <arg> where arg is `#1234` or `$cored_ref`, and returns the parsed JSON object.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            arg: {
+              type: "string",
+              description:
+                "Object reference in the format `#1234` or `$cored_ref` (for example `#15840` or `$string_utils`)."
+            }
+          },
+          required: ["arg"],
+          additionalProperties: false
+        }
+      },
+      {
+        name: "show-json",
+        description:
+          "Runs @show-json <arg>.<property> where arg is `#1234` or `$cored_ref` and property is optional, then joins fragmented output and returns parsed JSON.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            arg: {
+              type: "string",
+              description:
+                "Object reference in the format `#1234` or `$cored_ref` (for example `#15840` or `$slither`)."
+            },
+            property: {
+              type: "string",
+              description:
+                "Optional property name to append as `<arg>.<property>` when calling `@show-json`."
+            }
+          },
+          required: ["arg"],
+          additionalProperties: false
+        }
+      },
+      {
         name: "run_moo_eval",
         description:
           "Runs an eval expression on the MOO (for example `;parent(#22664)`) and returns body + return value.",
@@ -995,6 +1104,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     request.params.name !== "verb-data" &&
     request.params.name !== "verbs-json" &&
     request.params.name !== "props-json" &&
+    request.params.name !== "contents" &&
+    request.params.name !== "location" &&
+    request.params.name !== "show-json" &&
     request.params.name !== "run_moo_eval" &&
     request.params.name !== "run_moo_command" &&
     request.params.name !== "run_moo_code_search" &&
@@ -1217,7 +1329,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
-  if (request.params.name === "verbs-json" || request.params.name === "props-json") {
+  if (
+    request.params.name === "verbs-json" ||
+    request.params.name === "props-json" ||
+    request.params.name === "contents" ||
+    request.params.name === "location"
+  ) {
     let arg;
     try {
       arg = validateObjectRefArg(request.params.arguments?.arg);
@@ -1235,7 +1352,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     const commandName = request.params.name;
-    const command = commandName === "verbs-json" ? `@verbs-json ${arg}` : `@props-json ${arg}`;
+    let command;
+    if (commandName === "verbs-json") {
+      command = `@verbs-json ${arg}`;
+    } else if (commandName === "props-json") {
+      command = `@props-json ${arg}`;
+    } else if (commandName === "contents") {
+      command = `@contents-json ${arg}`;
+    } else {
+      command = `@location-json ${arg}`;
+    }
 
     logger.info("MOO object JSON requested", {
       event: "tool_object_json_request",
@@ -1271,10 +1397,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       );
       const parsed = parseJsonObjectOutput(captured.output);
       if (!parsed) {
-        const result = {
-          error: "unable to parse result into json",
-          truncated_response: truncateResponse(captured.output)
-        };
+        const isNewJsonCommand =
+          commandName === "contents" || commandName === "location";
+        const result = isNewJsonCommand
+          ? { error: "unable to parse result into json" }
+          : {
+              error: "unable to parse result into json",
+              truncated_response: truncateResponse(captured.output)
+            };
         logger.error("Failed to parse object JSON output", {
           event: "tool_object_json_parse_error",
           requestId,
@@ -1314,6 +1444,133 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         requestId,
         commandName,
         arg,
+        error: error.message
+      });
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "show-json") {
+    let arg;
+    try {
+      arg = validateObjectRefArg(request.params.arguments?.arg);
+    } catch (error) {
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const propertyRaw = request.params.arguments?.property;
+    const property = propertyRaw == null ? "" : String(propertyRaw).trim();
+    if (propertyRaw !== undefined && property.length === 0) {
+      const result = { error: "`property` must be a non-empty string when provided." };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const commandArg = property ? `${arg}.${property}` : arg;
+    const command = `@show-json ${commandArg}`;
+
+    logger.info("MOO show-json requested", {
+      event: "tool_show_json_request",
+      requestId,
+      arg,
+      property: property || undefined
+    });
+
+    if (!mooSession.connected || !mooSession.loggedIn) {
+      const result = { error: "MOO session is not logged in." };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_show_json_not_logged_in",
+        requestId,
+        arg,
+        property: property || undefined
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const captured = await mooSession.runCommandCaptureFragmentsUntilIdle(
+        command,
+        config.idleCaptureMs,
+        config.firstResponseTimeoutMs
+      );
+      const parsed = parseJsonObjectOutput(captured.output);
+
+      if (!parsed) {
+        const result = {
+          error: "unable to parse result into json"
+        };
+        logger.error("Failed to parse @show-json output", {
+          event: "tool_show_json_parse_error",
+          requestId,
+          arg,
+          property: property || undefined
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      logger.info("Successfully executed @show-json", {
+        event: "tool_show_json_success",
+        requestId,
+        arg,
+        property: property || undefined
+      });
+
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(parsed, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("@show-json execution failed", {
+        event: "tool_show_json_execution_error",
+        requestId,
+        arg,
+        property: property || undefined,
         error: error.message
       });
       const result = { error: error.message };
