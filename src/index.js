@@ -788,18 +788,25 @@ function parseJsonObjectOutput(rawOutput) {
 function validateVerbInfoArg(rawArg) {
   const arg = String(rawArg ?? "").trim();
   const usage =
-    "Usage: `obj:verb_spec` where obj is `#1234` or `$cored_ref`, separator is `:` or `::`, and verb_spec uses letters/underscores with optional `*` (for example `#24608:outgoing_bridges`, `#24608:send_*`, `#24608::outgoing_bridges`).";
+    "Usage: `obj:verb_spec` where obj is `#1234` or `$cored_ref`, separator is `:` or `::`, and `verb_spec` is any non-empty string (for example `#24608:outgoing_bridges`, `#24608:@asdf`, `#24608::\"_asdf\"`).";
 
   if (!arg) {
     throw new Error(`\`arg\` must be a non-empty string. ${usage}`);
   }
 
-  const pattern = /^(\$[A-Za-z0-9_]+|#\d+)::?([A-Za-z_][A-Za-z0-9_*]*)$/;
-  if (!pattern.test(arg)) {
+  const match = arg.match(/^(\$[A-Za-z0-9_]+|#\d+)(::?)([\s\S]+)$/);
+  if (!match) {
     throw new Error(`Invalid \`arg\`. ${usage}`);
   }
 
-  return arg;
+  const objectRef = match[1];
+  const separator = match[2];
+  const verbSpec = match[3].trim();
+  if (!verbSpec) {
+    throw new Error(`Invalid \`arg\`. ${usage}`);
+  }
+
+  return `${objectRef}${separator}${verbSpec}`;
 }
 
 function validateObjectRefArg(rawArg) {
@@ -824,11 +831,19 @@ function validateInput(args) {
     throw new Error("`object` must be a cored reference like `$string_utils` or object id like `#1234`.");
   }
 
-  if (!/^[A-Za-z_]+$/.test(verbName)) {
-    throw new Error("`verb` must use letters/underscores only (no numbers).");
+  if (!verbName) {
+    throw new Error("`verb` must be a non-empty string.");
   }
 
   return { objectRef, verbName };
+}
+
+function formatListVerbSpec(verbName) {
+  if (/^[A-Za-z0-9_]+$/.test(verbName)) {
+    return verbName;
+  }
+
+  return JSON.stringify(verbName);
 }
 
 const mooSession = new MooTelnetSession({
@@ -868,7 +883,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             verb: {
               type: "string",
-              description: "Verb name (letters/underscores only)."
+              description: "Verb name as any non-empty string."
             }
           },
           required: ["object", "verb"],
@@ -878,14 +893,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "verb-data",
         description:
-          "Runs @verb-data <arg> where arg is obj:verb_spec (for example `#1234:look`, `#24608:send_*`, or `#24608::outgoing_bridges`), parses JSON response, and enriches source.code from source.code_lines when available.",
+          "Runs @verb-data <arg> where arg is obj:verb_spec (for example `#1234:look`, `#24608:@asdf`, or `#24608::\"_asdf\"`), parses JSON response, and enriches source.code from source.code_lines when available.",
         inputSchema: {
           type: "object",
           properties: {
             arg: {
               type: "string",
               description:
-                "Required format: `obj:verb_spec` where obj is `#1234` or `$cored_ref`, separator is `:` or `::`, and verb_spec uses letters/underscores with optional `*` (e.g. `#22664:foo`, `#24608:send_*`, or `#24608::outgoing_bridges`)."
+                "Required format: `obj:verb_spec` where obj is `#1234` or `$cored_ref`, separator is `:` or `::`, and `verb_spec` is any non-empty string (e.g. `#22664:foo`, `#24608:@asdf`, or `#24608::\"_asdf\"`)."
             }
           },
           required: ["arg"],
@@ -1171,7 +1186,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     try {
-      const output = await mooSession.runCommand(`@list ${objectRef}:${verbName}`);
+      const output = await mooSession.runCommand(
+        `@list ${objectRef}:${formatListVerbSpec(verbName)}`
+      );
       const parsed = parseVerbListing(output, objectRef, verbName);
 
       if (parsed.error) {
