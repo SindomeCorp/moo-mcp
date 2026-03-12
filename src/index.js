@@ -23,7 +23,6 @@ const KEEP_ALIVE_TEXT = "#$# Ping!";
 const DEFAULT_IDLE_CAPTURE_MS = 1000;
 const DEFAULT_FIRST_RESPONSE_TIMEOUT_MS = 2000;
 const DEFAULT_CODE_SEARCH_TIMEOUT_MS = 15000;
-const DEFAULT_GREP_TIMEOUT_MS = 30000;
 
 function readEnv(keys) {
   for (const key of keys) {
@@ -52,9 +51,6 @@ const config = {
   codeSearchTimeoutMs: Number(
     readEnv(["moo-code-search-timeout-ms", "MOO_CODE_SEARCH_TIMEOUT_MS"]) ??
       DEFAULT_CODE_SEARCH_TIMEOUT_MS
-  ),
-  grepTimeoutMs: Number(
-    readEnv(["moo-grep-timeout-ms", "MOO_GREP_TIMEOUT_MS"]) ?? DEFAULT_GREP_TIMEOUT_MS
   )
 };
 
@@ -92,12 +88,6 @@ if (
 if (!Number.isFinite(config.codeSearchTimeoutMs) || config.codeSearchTimeoutMs <= 0) {
   throw new Error(
     "Invalid code-search timeout. Set moo-code-search-timeout-ms (or MOO_CODE_SEARCH_TIMEOUT_MS) to a positive number."
-  );
-}
-
-if (!Number.isFinite(config.grepTimeoutMs) || config.grepTimeoutMs <= 0) {
-  throw new Error(
-    "Invalid grep timeout. Set moo-grep-timeout-ms (or MOO_GREP_TIMEOUT_MS) to a positive number."
   );
 }
 
@@ -680,61 +670,6 @@ function parseEvalOutput(rawOutput, evalCommand) {
   };
 }
 
-function parseGrepOutput(rawOutput, grepText) {
-  const normalized = rawOutput.replace(/\r\n/g, "\n").trim();
-  const lines = normalized.split("\n");
-  const totalMatch = normalized.match(/(?:^|\n)Total:\s+(\d+)\s+verbs\.\s*$/);
-
-  if (!totalMatch) {
-    return {
-      error: true,
-      reason: "Unexpected @grep response format (missing Total line).",
-      query: grepText,
-      raw_output: rawOutput
-    };
-  }
-
-  const totalVerbs = Number(totalMatch[1]);
-  const checkpoints = [];
-  const matches = [];
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    const checkpoint = trimmed.match(/^\.\.\.#(\d+)$/);
-    if (checkpoint) {
-      checkpoints.push(Number(checkpoint[1]));
-      continue;
-    }
-
-    const result = line.match(
-      /^(.*)\s+\(#(\d+)\):(.+?)\s+\[([^\]]+)\s+\(#(\d+)\)\]\s+\(line\s+(\d+)\):\s{2}(.*)$/
-    );
-    if (result) {
-      const [, objectName, objectId, verbNames, editorName, editorId, lineNumber, sourceLine] =
-        result;
-      matches.push({
-        object_name: objectName.trim(),
-        object_id: Number(objectId),
-        verb_names: verbNames.trim(),
-        verb_aliases: verbNames.trim().split(/\s+/).filter(Boolean),
-        editor_name: editorName.trim(),
-        editor_id: Number(editorId),
-        line_number: Number(lineNumber),
-        source_line: sourceLine
-      });
-    }
-  }
-
-  return {
-    error: false,
-    query: grepText,
-    total_verbs: totalVerbs,
-    checkpoints,
-    matches
-  };
-}
-
 function parseVerbInfoOutput(rawOutput, arg) {
   const normalized = rawOutput.replace(/\r\n/g, "\n").trim();
   let parsed;
@@ -971,22 +906,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
-        name: "run_moo_grep",
-        description:
-          "Runs @grep <text> on the MOO and returns parsed matches once the final `Total: N verbs.` line arrives.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            text: {
-              type: "string",
-              description: "Text snippet to search with @grep."
-            }
-          },
-          required: ["text"],
-          additionalProperties: false
-        }
-      },
-      {
         name: "run_moo_code_search",
         description:
           "Runs @code-search <pattern> on the MOO (optionally with --scope), converts the response to a JSON object, and returns it as `value`.",
@@ -1078,7 +997,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     request.params.name !== "props-json" &&
     request.params.name !== "run_moo_eval" &&
     request.params.name !== "run_moo_command" &&
-    request.params.name !== "run_moo_grep" &&
     request.params.name !== "run_moo_code_search" &&
     request.params.name !== "prop-search"
   ) {
@@ -1505,128 +1423,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         reason: error.message,
         command,
         output: ""
-      };
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(result, null, 2)
-          }
-        ]
-      };
-    }
-  }
-
-  if (request.params.name === "run_moo_grep") {
-    const grepText = String(request.params.arguments?.text ?? "").trim();
-    if (!grepText) {
-      const result = {
-        error: true,
-        reason: "`text` must be a non-empty string.",
-        query: "",
-        raw_output: ""
-      };
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(result, null, 2)
-          }
-        ]
-      };
-    }
-
-    logger.info("MOO grep requested", {
-      event: "tool_grep_request",
-      requestId,
-      query: grepText
-    });
-
-    if (!mooSession.connected || !mooSession.loggedIn) {
-      const result = {
-        error: true,
-        reason: "MOO session is not logged in.",
-        query: grepText,
-        raw_output: ""
-      };
-      logger.error("MOO session is not logged in.", {
-        event: "tool_grep_not_logged_in",
-        requestId,
-        query: grepText
-      });
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(result, null, 2)
-          }
-        ]
-      };
-    }
-
-    try {
-      const output = await mooSession.runCommandUntil(
-        `@grep ${grepText}`,
-        (buffer) => {
-          const totalMatch = /(^|\r?\n)(Total:\s+\d+\s+verbs\.)(\r?\n|$)/m.exec(buffer);
-          if (!totalMatch) {
-            return { done: false };
-          }
-
-          const totalLineStart = totalMatch.index + totalMatch[1].length;
-          const totalLineEnd = totalLineStart + totalMatch[2].length + totalMatch[3].length;
-          const trailing = buffer.slice(totalLineEnd).trim();
-          if (trailing.length > 0) {
-            return { done: false };
-          }
-
-          return { done: true, consumedChars: totalLineEnd };
-        },
-        config.grepTimeoutMs
-      );
-      const parsed = parseGrepOutput(output, grepText);
-
-      if (parsed.error) {
-        logger.error("Failed to parse @grep output", {
-          event: "tool_grep_parse_error",
-          requestId,
-          query: grepText
-        });
-      } else {
-        logger.info("Successfully executed @grep", {
-          event: "tool_grep_success",
-          requestId,
-          query: grepText,
-          totalVerbs: parsed.total_verbs,
-          matchLines: parsed.matches.length
-        });
-      }
-
-      return {
-        isError: Boolean(parsed.error),
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(parsed, null, 2)
-          }
-        ]
-      };
-    } catch (error) {
-      logger.error("@grep execution failed", {
-        event: "tool_grep_execution_error",
-        requestId,
-        query: grepText,
-        error: error.message
-      });
-
-      const result = {
-        error: true,
-        reason: error.message,
-        query: grepText,
-        raw_output: ""
       };
       return {
         isError: true,
