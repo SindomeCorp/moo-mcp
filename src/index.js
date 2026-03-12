@@ -724,7 +724,7 @@ function parseEvalOutput(rawOutput, evalCommand) {
 }
 
 function parseVerbInfoOutput(rawOutput, arg) {
-  const normalized = rawOutput.replace(/\r\n/g, "\n").trim();
+  const normalized = sanitizeJsonText(rawOutput);
   let parsed;
 
   try {
@@ -769,7 +769,7 @@ function truncateResponse(rawOutput) {
 }
 
 function parseJsonObjectOutput(rawOutput) {
-  const normalized = rawOutput.replace(/\r\n/g, "\n").trim();
+  const normalized = sanitizeJsonText(rawOutput);
   let parsed;
 
   try {
@@ -807,6 +807,28 @@ function validateVerbInfoArg(rawArg) {
   }
 
   return `${objectRef}${separator}${verbSpec}`;
+}
+
+function sanitizeJsonText(rawOutput) {
+  const ansiPattern =
+    /(?:\u001B\[|\u009B)[0-?]*[ -/]*[@-~]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g;
+  const brokenColorFragmentPattern =
+    /(?:\u001B\[|\u009B|\[)\d{1,3}(?:[;:]\d{1,3})*[A-Za-z]?/g;
+  const webclientColorTagPattern = /\(\d{3}\|\d{3}\|[0-9A-Za-z]{7}\)/g;
+
+  let text = String(rawOutput ?? "").replace(/\r\n/g, "\n");
+  let previous;
+
+  do {
+    previous = text;
+    text = text
+      .replace(ansiPattern, "")
+      .replace(brokenColorFragmentPattern, "")
+      .replace(webclientColorTagPattern, "")
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+  } while (text !== previous);
+
+  return text.trim();
 }
 
 function validateObjectRefArg(rawArg) {
@@ -1910,7 +1932,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       let parsed;
       try {
-        parsed = JSON.parse(captured.output);
+        parsed = JSON.parse(sanitizeJsonText(captured.output));
       } catch {
         const result = {
           error: "unable to convert result to json",
