@@ -1088,6 +1088,64 @@ function validateBugsJsonArg(rawArg) {
   return arg;
 }
 
+function escapeMooString(value) {
+  return String(value ?? "")
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, "\\\"");
+}
+
+function textToMooStringList(rawText) {
+  const text = String(rawText ?? "");
+  if (text.length === 0) {
+    return "{}";
+  }
+
+  const lines = text.split(/\r\n|\n|\r/);
+  if (lines.length === 0) {
+    return "{}";
+  }
+
+  const encoded = lines.map((line) => `"${escapeMooString(line)}"`);
+  return `{${encoded.join(", ")}}`;
+}
+
+function parseNextUnreviewedBugResult(returnValueRaw) {
+  const value = String(returnValueRaw ?? "").trim().toLowerCase();
+
+  if (value === "false" || value === "0") {
+    return { hasBug: false, bugId: null };
+  }
+
+  if (!/^\d+$/.test(value)) {
+    throw new Error("Unexpected return value from bot_get_next_unreviewed_bug().");
+  }
+
+  const bugId = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(bugId) || bugId <= 0) {
+    return { hasBug: false, bugId: null };
+  }
+
+  return { hasBug: true, bugId };
+}
+
+function validatePositiveInteger(value, fieldName) {
+  if (typeof value === "number") {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`\`${fieldName}\` must be a positive integer.`);
+    }
+    return value;
+  }
+
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isSafeInteger(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  throw new Error(`\`${fieldName}\` must be a positive integer.`);
+}
+
 function validateInput(args) {
   const objectRef = String(args?.object ?? "").trim();
   const verbName = String(args?.verb ?? "").trim();
@@ -1274,6 +1332,37 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "get-next-unreviewed-bug",
+        description:
+          "Runs `;$kaiju:bot_get_next_unreviewed_bug()` and returns JSON with the next unreviewed bug id, or an error when none are available.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        }
+      },
+      {
+        name: "submit_bug_comment",
+        description:
+          "Runs `;$kaiju:bot_submit_comment(<bug_id>, <moo_comment_list>)` where comment text is converted internally into a MOO list of strings.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            bug_id: {
+              type: "integer",
+              description: "Bug id as a positive integer."
+            },
+            comment: {
+              type: "string",
+              description:
+                "Comment text. Newlines are preserved and converted into a MOO list of strings."
+            }
+          },
+          required: ["bug_id", "comment"],
+          additionalProperties: false
+        }
+      },
+      {
         name: "show-json",
         description:
           "Runs @show-json <arg>.<property> where arg is `#1234` or `$cored_ref` and property is optional, then joins fragmented output and returns parsed JSON.",
@@ -1421,6 +1510,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     request.params.name !== "location" &&
     request.params.name !== "vb-json" &&
     request.params.name !== "bugs-json" &&
+    request.params.name !== "get-next-unreviewed-bug" &&
+    request.params.name !== "submit_bug_comment" &&
     request.params.name !== "show-json" &&
     request.params.name !== "run_moo_eval" &&
     request.params.name !== "run_moo_command" &&
@@ -1983,6 +2074,337 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         error: error.message
       });
       const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "get-next-unreviewed-bug") {
+    const evalCommand = ";$kaiju:bot_get_next_unreviewed_bug()";
+
+    logger.info("MOO next unreviewed bug requested", {
+      event: "tool_next_unreviewed_bug_request",
+      requestId
+    });
+
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = {
+        error: true,
+        reason: error.message || "MOO session is not logged in."
+      };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_next_unreviewed_bug_not_logged_in",
+        requestId
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const output = await mooSession.runCommandUntil(
+        evalCommand,
+        (buffer) => {
+          const normalized = buffer.replace(/\r\n/g, "\n");
+          const match = /(^|\r?\n)(\s*=>[^\r\n]*)(\r?\n|$)/m.exec(buffer);
+          if (!match) {
+            if (
+              /(?:^|\n)(?:Line\s+\d+:\s+[^\n]*\n)+\d+\s+error(?:s)?\.\s*$/i.test(normalized)
+            ) {
+              return { done: true };
+            }
+            return { done: false };
+          }
+
+          const returnStart = match.index + match[1].length;
+          const returnEnd = returnStart + match[2].length + match[3].length;
+          const trailing = buffer.slice(returnEnd).trim();
+          if (trailing.length > 0) {
+            return { done: false };
+          }
+
+          return { done: true, consumedChars: returnEnd };
+        },
+        LIST_TIMEOUT_MS
+      );
+      const parsedEval = parseEvalOutput(output, evalCommand);
+      if (parsedEval.error) {
+        logger.error("Failed to parse eval output for next unreviewed bug", {
+          event: "tool_next_unreviewed_bug_eval_parse_error",
+          requestId
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(parsedEval, null, 2)
+            }
+          ]
+        };
+      }
+
+      let parsedResult;
+      try {
+        parsedResult = parseNextUnreviewedBugResult(parsedEval.return_value);
+      } catch (error) {
+        const result = {
+          error: true,
+          reason: error.message || "Unexpected return value from bot_get_next_unreviewed_bug().",
+          return_value: parsedEval.return_value,
+          response_body: parsedEval.response_body,
+          raw_output: output
+        };
+        logger.error("Unexpected next unreviewed bug return value", {
+          event: "tool_next_unreviewed_bug_unexpected_return",
+          requestId,
+          returnValue: parsedEval.return_value
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      if (!parsedResult.hasBug) {
+        const result = {
+          error: true,
+          reason: "No unreviewed bug is available."
+        };
+        logger.info("No unreviewed bug available", {
+          event: "tool_next_unreviewed_bug_none",
+          requestId
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      const result = {
+        bug_id: parsedResult.bugId
+      };
+      logger.info("Found next unreviewed bug", {
+        event: "tool_next_unreviewed_bug_success",
+        requestId,
+        bugId: parsedResult.bugId
+      });
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      const result = {
+        error: true,
+        reason: error.message
+      };
+      logger.error("Next unreviewed bug command failed", {
+        event: "tool_next_unreviewed_bug_execution_error",
+        requestId,
+        error: error.message
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "submit_bug_comment") {
+    let bugId;
+    let comment;
+
+    try {
+      bugId = validatePositiveInteger(request.params.arguments?.bug_id, "bug_id");
+      comment = String(request.params.arguments?.comment ?? "");
+      if (!comment.trim()) {
+        throw new Error("`comment` must be a non-empty string.");
+      }
+    } catch (error) {
+      const result = {
+        error: true,
+        reason: error.message
+      };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const commentList = textToMooStringList(comment);
+    const evalCommand = `;$kaiju:bot_submit_comment(${bugId}, ${commentList})`;
+
+    logger.info("MOO submit bug comment requested", {
+      event: "tool_submit_bug_comment_request",
+      requestId,
+      bugId
+    });
+
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = {
+        error: true,
+        reason: error.message || "MOO session is not logged in.",
+        bug_id: bugId
+      };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_submit_bug_comment_not_logged_in",
+        requestId,
+        bugId
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const output = await mooSession.runCommandUntil(
+        evalCommand,
+        (buffer) => {
+          const normalized = buffer.replace(/\r\n/g, "\n");
+          const match = /(^|\r?\n)(\s*=>[^\r\n]*)(\r?\n|$)/m.exec(buffer);
+          if (!match) {
+            if (
+              /(?:^|\n)(?:Line\s+\d+:\s+[^\n]*\n)+\d+\s+error(?:s)?\.\s*$/i.test(normalized)
+            ) {
+              return { done: true };
+            }
+            return { done: false };
+          }
+
+          const returnStart = match.index + match[1].length;
+          const returnEnd = returnStart + match[2].length + match[3].length;
+          const trailing = buffer.slice(returnEnd).trim();
+          if (trailing.length > 0) {
+            return { done: false };
+          }
+
+          return { done: true, consumedChars: returnEnd };
+        },
+        LIST_TIMEOUT_MS
+      );
+      const parsedEval = parseEvalOutput(output, evalCommand);
+      if (parsedEval.error) {
+        logger.error("Failed to submit bug comment", {
+          event: "tool_submit_bug_comment_eval_error",
+          requestId,
+          bugId
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(parsedEval, null, 2)
+            }
+          ]
+        };
+      }
+
+      const returnValue = String(parsedEval.return_value ?? "").trim().toLowerCase();
+      if (returnValue === "false" || returnValue === "0") {
+        const result = {
+          error: true,
+          reason: "bot_submit_comment returned false.",
+          bug_id: bugId,
+          return_value: parsedEval.return_value,
+          response_body: parsedEval.response_body,
+          raw_output: output
+        };
+        logger.error("bot_submit_comment returned false", {
+          event: "tool_submit_bug_comment_false",
+          requestId,
+          bugId
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      const result = {
+        bug_id: bugId,
+        return_value: parsedEval.return_value,
+        response_body: parsedEval.response_body
+      };
+      logger.info("Successfully submitted bug comment", {
+        event: "tool_submit_bug_comment_success",
+        requestId,
+        bugId
+      });
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      const result = {
+        error: true,
+        reason: error.message,
+        bug_id: bugId
+      };
+      logger.error("submit_bug_comment execution failed", {
+        event: "tool_submit_bug_comment_execution_error",
+        requestId,
+        bugId,
+        error: error.message
+      });
       return {
         isError: true,
         content: [
