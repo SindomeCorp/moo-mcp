@@ -158,9 +158,13 @@ class MooTelnetSession {
     this.buffer = "";
     this.commandQueue = Promise.resolve();
     this.keepAliveTimer = null;
+    this.reconnectPromise = null;
   }
 
   async connectAndLogin() {
+    this.close();
+    this.buffer = "";
+
     this.socket = net.createConnection({
       host: this.host,
       port: this.port
@@ -170,12 +174,14 @@ class MooTelnetSession {
     this.socket.on("data", (chunk) => this.onData(Buffer.from(chunk, "binary")));
     this.socket.on("error", (error) => {
       this.logger.error("MOO socket error", { event: "moo_socket_error", error: error.message });
+      this.rejectPending(error);
     });
     this.socket.on("close", () => {
       const wasConnected = this.connected;
       this.connected = false;
       this.loggedIn = false;
       this.stopKeepAlive();
+      this.rejectPending(new Error("MOO connection closed."));
 
       if (wasConnected) {
         this.logger.error("MOO connection closed", { event: "moo_connection_closed" });
@@ -206,6 +212,35 @@ class MooTelnetSession {
     this.loggedIn = true;
     this.startKeepAlive();
     this.logger.info("Logged into MOO", { event: "moo_logged_in", user: this.username });
+  }
+
+  async ensureConnectedAndLoggedIn() {
+    if (this.socket && this.connected && this.loggedIn) {
+      return;
+    }
+
+    if (!this.reconnectPromise) {
+      this.reconnectPromise = this.enqueue(async () => {
+        if (this.socket && this.connected && this.loggedIn) {
+          return;
+        }
+
+        this.logger.warn("MOO session unavailable; reconnecting", {
+          event: "moo_reconnect_attempt"
+        });
+        await this.connectAndLogin();
+
+        if (!this.socket || !this.connected || !this.loggedIn) {
+          throw new Error("MOO session is not logged in.");
+        }
+
+        this.logger.info("MOO session reconnected", { event: "moo_reconnect_success" });
+      }).finally(() => {
+        this.reconnectPromise = null;
+      });
+    }
+
+    return this.reconnectPromise;
   }
 
   startKeepAlive() {
@@ -569,8 +604,19 @@ class MooTelnetSession {
     resolve(result.trim());
   }
 
+  rejectPending(error) {
+    if (!this.pending) {
+      return;
+    }
+
+    const { reject } = this.pending;
+    this.pending = null;
+    reject(error);
+  }
+
   close() {
     this.stopKeepAlive();
+    this.rejectPending(new Error("MOO connection closed."));
 
     if (this.socket) {
       this.socket.end();
@@ -770,12 +816,26 @@ function truncateResponse(rawOutput) {
 
 function parseJsonObjectOutput(rawOutput) {
   const normalized = sanitizeJsonText(rawOutput);
-  let parsed;
+  const extracted = extractFirstJsonObjectText(normalized);
+  const candidates = [normalized];
+  if (extracted && extracted !== normalized) {
+    candidates.push(extracted);
+  }
 
-  try {
-    parsed = JSON.parse(normalized);
-  } catch {
-    return null;
+  let parsed = null;
+  for (const candidate of candidates) {
+    parsed = tryParseJsonObject(candidate);
+    if (parsed) {
+      break;
+    }
+
+    const repaired = escapeRawNewlinesInsideJsonStrings(candidate);
+    if (repaired !== candidate) {
+      parsed = tryParseJsonObject(repaired);
+      if (parsed) {
+        break;
+      }
+    }
   }
 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -783,6 +843,120 @@ function parseJsonObjectOutput(rawOutput) {
   }
 
   return parsed;
+}
+
+function tryParseJsonObject(text) {
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function escapeRawNewlinesInsideJsonStrings(text) {
+  const input = String(text ?? "");
+  let output = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i];
+
+    if (inString) {
+      if (escaped) {
+        output += char;
+        escaped = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        output += char;
+        escaped = true;
+        continue;
+      }
+
+      if (char === "\"") {
+        output += char;
+        inString = false;
+        continue;
+      }
+
+      if (char === "\r") {
+        if (input[i + 1] === "\n") {
+          i += 1;
+        }
+        output += "\\n";
+        continue;
+      }
+
+      if (char === "\n") {
+        output += "\\n";
+        continue;
+      }
+
+      output += char;
+      continue;
+    }
+
+    output += char;
+    if (char === "\"") {
+      inString = true;
+      escaped = false;
+    }
+  }
+
+  return output;
+}
+
+function extractFirstJsonObjectText(text) {
+  const input = String(text ?? "");
+  for (let start = 0; start < input.length; start += 1) {
+    if (input[start] !== "{") {
+      continue;
+    }
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = start; i < input.length; i += 1) {
+      const char = input[i];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === "\\") {
+          escaped = true;
+        } else if (char === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = true;
+        continue;
+      }
+
+      if (char === "{") {
+        depth += 1;
+        continue;
+      }
+
+      if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          return input.slice(start, i + 1);
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 function validateVerbInfoArg(rawArg) {
@@ -848,6 +1022,67 @@ function validateObjectRefArg(rawArg) {
 
   if (!/^(\$[A-Za-z0-9_]+|#\d+)$/.test(arg)) {
     throw new Error("`arg` must be a cored reference like `$string_utils` or object id like `#1234`.");
+  }
+
+  return arg;
+}
+
+function validateVbJsonArg(rawArg) {
+  const usage = "`arg` must be a positive integer bug id or the string `last`.";
+
+  if (typeof rawArg === "number") {
+    if (!Number.isInteger(rawArg) || rawArg <= 0) {
+      throw new Error(usage);
+    }
+    return String(rawArg);
+  }
+
+  const arg = String(rawArg ?? "").trim();
+  if (!arg) {
+    throw new Error(usage);
+  }
+
+  if (/^last$/i.test(arg)) {
+    return "last";
+  }
+
+  if (!/^\d+$/.test(arg)) {
+    throw new Error(usage);
+  }
+
+  const numeric = Number.parseInt(arg, 10);
+  if (!Number.isSafeInteger(numeric) || numeric <= 0) {
+    throw new Error(usage);
+  }
+
+  return String(numeric);
+}
+
+function validateBugsJsonArg(rawArg) {
+  if (rawArg === undefined || rawArg === null) {
+    return "";
+  }
+
+  const arg = String(rawArg).trim();
+  if (!arg) {
+    return "";
+  }
+
+  const normalized = arg.toLowerCase();
+  if (
+    normalized === "new" ||
+    normalized === "unassigned" ||
+    normalized === "assigned" ||
+    normalized === "resolved" ||
+    normalized === "mine"
+  ) {
+    return normalized;
+  }
+
+  if (arg.length < 3) {
+    throw new Error(
+      "`arg` search text must be at least 3 characters, or one of: `new`, `unassigned`, `assigned`, `resolved`, `mine`."
+    );
   }
 
   return arg;
@@ -1006,6 +1241,39 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "vb-json",
+        description:
+          "Runs @vb-json <id|last> to fetch bug details and returns the parsed JSON object.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            arg: {
+              type: ["integer", "string"],
+              description:
+                "Bug id as a positive integer (for example `12345`) or the string `last` for the last viewed bug."
+            }
+          },
+          required: ["arg"],
+          additionalProperties: false
+        }
+      },
+      {
+        name: "bugs-json",
+        description:
+          "Runs @bugs-json with an optional state/search argument and returns the parsed JSON object.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            arg: {
+              type: "string",
+              description:
+                "Optional: one of `new`, `unassigned`, `assigned`, `resolved`, `mine`, or a search string (minimum 3 characters). Omit for open unresolved bugs."
+            }
+          },
+          additionalProperties: false
+        }
+      },
+      {
         name: "show-json",
         description:
           "Runs @show-json <arg>.<property> where arg is `#1234` or `$cored_ref` and property is optional, then joins fragmented output and returns parsed JSON.",
@@ -1151,6 +1419,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     request.params.name !== "props-json" &&
     request.params.name !== "contents" &&
     request.params.name !== "location" &&
+    request.params.name !== "vb-json" &&
+    request.params.name !== "bugs-json" &&
     request.params.name !== "show-json" &&
     request.params.name !== "run_moo_eval" &&
     request.params.name !== "run_moo_command" &&
@@ -1194,8 +1464,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       verb: verbName
     });
 
-    if (!mooSession.connected || !mooSession.loggedIn) {
-      const message = "MOO session is not logged in.";
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const message = error.message || "MOO session is not logged in.";
       logger.error(message, {
         event: "tool_request_not_logged_in",
         requestId,
@@ -1296,10 +1568,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       arg
     });
 
-    if (!mooSession.connected || !mooSession.loggedIn) {
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
       const result = {
         error: true,
-        reason: "MOO session is not logged in.",
+        reason: error.message || "MOO session is not logged in.",
         arg,
         raw_output: ""
       };
@@ -1417,8 +1691,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       arg
     });
 
-    if (!mooSession.connected || !mooSession.loggedIn) {
-      const result = { error: "MOO session is not logged in." };
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = { error: error.message || "MOO session is not logged in." };
       logger.error("MOO session is not logged in.", {
         event: "tool_object_json_not_logged_in",
         requestId,
@@ -1506,6 +1782,219 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
+  if (request.params.name === "vb-json") {
+    let arg;
+    try {
+      arg = validateVbJsonArg(request.params.arguments?.arg);
+    } catch (error) {
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    logger.info("MOO vb-json requested", {
+      event: "tool_vb_json_request",
+      requestId,
+      arg
+    });
+
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = { error: error.message || "MOO session is not logged in." };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_vb_json_not_logged_in",
+        requestId,
+        arg
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const captured = await mooSession.runCommandCaptureUntilIdle(
+        `@vb-json ${arg}`,
+        config.idleCaptureMs,
+        config.firstResponseTimeoutMs
+      );
+      const parsed = parseJsonObjectOutput(captured.output);
+      if (!parsed) {
+        const result = {
+          error: "unable to parse result into json",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error("Failed to parse @vb-json output", {
+          event: "tool_vb_json_parse_error",
+          requestId,
+          arg
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      logger.info("Successfully executed @vb-json", {
+        event: "tool_vb_json_success",
+        requestId,
+        arg
+      });
+
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(parsed, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("@vb-json execution failed", {
+        event: "tool_vb_json_execution_error",
+        requestId,
+        arg,
+        error: error.message
+      });
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "bugs-json") {
+    let arg;
+    try {
+      arg = validateBugsJsonArg(request.params.arguments?.arg);
+    } catch (error) {
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    logger.info("MOO bugs-json requested", {
+      event: "tool_bugs_json_request",
+      requestId,
+      arg: arg || undefined
+    });
+
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = { error: error.message || "MOO session is not logged in." };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_bugs_json_not_logged_in",
+        requestId,
+        arg: arg || undefined
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const command = arg ? `@bugs-json ${arg}` : "@bugs-json";
+      const captured = await mooSession.runCommandCaptureUntilIdle(
+        command,
+        config.idleCaptureMs,
+        config.firstResponseTimeoutMs
+      );
+      const parsed = parseJsonObjectOutput(captured.output);
+      if (!parsed) {
+        const result = {
+          error: "unable to parse result into json",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error("Failed to parse @bugs-json output", {
+          event: "tool_bugs_json_parse_error",
+          requestId,
+          arg: arg || undefined
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      logger.info("Successfully executed @bugs-json", {
+        event: "tool_bugs_json_success",
+        requestId,
+        arg: arg || undefined
+      });
+
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(parsed, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("@bugs-json execution failed", {
+        event: "tool_bugs_json_execution_error",
+        requestId,
+        arg: arg || undefined,
+        error: error.message
+      });
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
   if (request.params.name === "show-json") {
     let arg;
     try {
@@ -1548,8 +2037,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       property: property || undefined
     });
 
-    if (!mooSession.connected || !mooSession.loggedIn) {
-      const result = { error: "MOO session is not logged in." };
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = { error: error.message || "MOO session is not logged in." };
       logger.error("MOO session is not logged in.", {
         event: "tool_show_json_not_logged_in",
         requestId,
@@ -1660,10 +2151,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       command
     });
 
-    if (!mooSession.connected || !mooSession.loggedIn) {
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
       const result = {
         error: true,
-        reason: "MOO session is not logged in.",
+        reason: error.message || "MOO session is not logged in.",
         command,
         output: ""
       };
@@ -1893,9 +2386,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       matchType
     });
 
-    if (!mooSession.connected || !mooSession.loggedIn) {
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
       const result = {
-        error: "MOO session is not logged in."
+        error: error.message || "MOO session is not logged in."
       };
       logger.error("MOO session is not logged in.", {
         event: `${eventPrefix}_not_logged_in`,
@@ -2064,10 +2559,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     eval: evalCommand
   });
 
-  if (!mooSession.connected || !mooSession.loggedIn) {
+  try {
+    await mooSession.ensureConnectedAndLoggedIn();
+  } catch (error) {
     const result = {
       error: true,
-      reason: "MOO session is not logged in.",
+      reason: error.message || "MOO session is not logged in.",
       eval: evalCommand,
       raw_output: ""
     };
