@@ -1332,6 +1332,54 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "cored_json",
+        description:
+          "Runs @cored-json with an optional arg and returns the parsed JSON object.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            arg: {
+              type: "string",
+              description:
+                "Optional argument string. When omitted or empty, runs `@cored-json`."
+            }
+          },
+          additionalProperties: false
+        }
+      },
+      {
+        name: "defines_verb_json",
+        description:
+          "Runs @defines-verb-json with an optional arg and returns the parsed JSON object.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            arg: {
+              type: "string",
+              description:
+                "Verb name to search for. When omitted or empty, runs `@defines-verb-json` to preserve verb-side usage errors."
+            }
+          },
+          additionalProperties: false
+        }
+      },
+      {
+        name: "defines_prop_json",
+        description:
+          "Runs @defines-prop-json with an optional arg and returns the parsed JSON object.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            arg: {
+              type: "string",
+              description:
+                "Property name to search for. When omitted or empty, runs `@defines-prop-json` to preserve verb-side usage errors."
+            }
+          },
+          additionalProperties: false
+        }
+      },
+      {
         name: "get-next-unreviewed-bug",
         description:
           "Runs `;$kaiju:bot_get_next_unreviewed_bug()` and returns JSON with the next unreviewed bug id, or an error when none are available.",
@@ -1381,6 +1429,74 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             }
           },
           required: ["arg"],
+          additionalProperties: false
+        }
+      },
+      {
+        name: "search-json",
+        description:
+          "Runs @search-json --help or @search-json <type> [filters], then parses and returns the JSON object response.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            help: {
+              type: "boolean",
+              description: "When true, runs `@search-json --help`."
+            },
+            type: {
+              type: "string",
+              description:
+                "Search type when `help` is not true. Canonical values: `rooms`, `exits`, `npcs`, `players`, `players-all`, `avatars`, `vehicles`, `jobs`, `attacks`, `channels`, `wares`, `things`."
+            },
+            name: {
+              type: "string",
+              description: "Optional name filter, sent as `n=<value>`."
+            },
+            location: {
+              type: "string",
+              description: "Optional location filter, sent as `l=<value>`."
+            },
+            parent: {
+              type: "string",
+              description: "Optional parent filter, sent as `p=<value>`."
+            },
+            sic: {
+              type: "string",
+              description: "Optional SIC filter, sent as `a=<value>`."
+            },
+            prop: {
+              type: "string",
+              description: "Optional property filter, sent as `prop=<value>`."
+            },
+            mutex: {
+              type: "string",
+              description: "Optional mutex filter, sent as `mutex=<value>`."
+            },
+            moved_by: {
+              type: "string",
+              description: "Optional moved-by filter, sent as `w=<value>`."
+            },
+            generics_only: {
+              type: "boolean",
+              description: "Optional flag; when true appends `-g`."
+            },
+            mementos_only: {
+              type: "boolean",
+              description: "Optional flag; when true appends `-m`."
+            },
+            limit: {
+              type: "integer",
+              description:
+                "Optional positive integer limit, sent as `limit=<value>`."
+            },
+            extra_filters: {
+              type: "array",
+              description: "Optional additional filter tokens appended as-is.",
+              items: {
+                type: "string"
+              }
+            }
+          },
           additionalProperties: false
         }
       },
@@ -1510,9 +1626,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     request.params.name !== "location" &&
     request.params.name !== "vb-json" &&
     request.params.name !== "bugs-json" &&
+    request.params.name !== "cored_json" &&
+    request.params.name !== "defines_verb_json" &&
+    request.params.name !== "defines_prop_json" &&
     request.params.name !== "get-next-unreviewed-bug" &&
     request.params.name !== "submit_bug_comment" &&
     request.params.name !== "show-json" &&
+    request.params.name !== "search-json" &&
     request.params.name !== "run_moo_eval" &&
     request.params.name !== "run_moo_command" &&
     request.params.name !== "run_moo_code_search" &&
@@ -2086,6 +2206,437 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
+  if (request.params.name === "cored_json") {
+    const argRaw = request.params.arguments?.arg;
+    if (argRaw !== undefined && argRaw !== null && typeof argRaw !== "string") {
+      const result = { error: "`arg` must be a string when provided." };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const arg = String(argRaw ?? "").trim();
+    const command = arg ? `@cored-json ${arg}` : "@cored-json";
+
+    logger.info("MOO cored-json requested", {
+      event: "tool_cored_json_request",
+      requestId,
+      arg: arg || undefined
+    });
+
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = { error: error.message || "MOO session is not logged in." };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_cored_json_not_logged_in",
+        requestId,
+        arg: arg || undefined
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const captured = await mooSession.runCommandCaptureUntilIdle(
+        command,
+        config.idleCaptureMs,
+        config.firstResponseTimeoutMs
+      );
+      const parsed = parseJsonObjectOutput(captured.output);
+      if (!parsed) {
+        const result = {
+          error: "unable to parse result into json",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error("Failed to parse @cored-json output", {
+          event: "tool_cored_json_parse_error",
+          requestId,
+          arg: arg || undefined
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(parsed, "arg") ||
+        !Object.prototype.hasOwnProperty.call(parsed, "mode") ||
+        !Object.prototype.hasOwnProperty.call(parsed, "count") ||
+        !Object.prototype.hasOwnProperty.call(parsed, "records")
+      ) {
+        const result = {
+          error: "unexpected @cored-json response shape",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error("Invalid @cored-json JSON shape", {
+          event: "tool_cored_json_parse_error",
+          requestId,
+          arg: arg || undefined
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      logger.info("Successfully executed @cored-json", {
+        event: "tool_cored_json_success",
+        requestId,
+        arg: arg || undefined
+      });
+
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(parsed, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("@cored-json execution failed", {
+        event: "tool_cored_json_execution_error",
+        requestId,
+        arg: arg || undefined,
+        error: error.message
+      });
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "defines_verb_json") {
+    const argRaw = request.params.arguments?.arg;
+    if (argRaw !== undefined && argRaw !== null && typeof argRaw !== "string") {
+      const result = { error: "`arg` must be a string when provided." };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const arg = String(argRaw ?? "").trim();
+    const command = arg ? `@defines-verb-json ${arg}` : "@defines-verb-json";
+
+    logger.info("MOO defines-verb-json requested", {
+      event: "tool_defines_verb_json_request",
+      requestId,
+      arg: arg || undefined
+    });
+
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = { error: error.message || "MOO session is not logged in." };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_defines_verb_json_not_logged_in",
+        requestId,
+        arg: arg || undefined
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const captured = await mooSession.runCommandCaptureUntilIdle(
+        command,
+        config.idleCaptureMs,
+        config.firstResponseTimeoutMs
+      );
+      const parsed = parseJsonObjectOutput(captured.output);
+      if (!parsed) {
+        const result = {
+          error: "unable to parse result into json",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error("Failed to parse @defines-verb-json output", {
+          event: "tool_defines_verb_json_parse_error",
+          requestId,
+          arg: arg || undefined
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      if (Object.prototype.hasOwnProperty.call(parsed, "error")) {
+        logger.info("@defines-verb-json returned verb-side error payload", {
+          event: "tool_defines_verb_json_verb_error",
+          requestId,
+          arg: arg || undefined
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(parsed, null, 2)
+            }
+          ]
+        };
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(parsed, "query") ||
+        !Object.prototype.hasOwnProperty.call(parsed, "result_count") ||
+        !Object.prototype.hasOwnProperty.call(parsed, "results")
+      ) {
+        const result = {
+          error: "unexpected @defines-verb-json response shape",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error("Invalid @defines-verb-json JSON shape", {
+          event: "tool_defines_verb_json_parse_error",
+          requestId,
+          arg: arg || undefined
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      logger.info("Successfully executed @defines-verb-json", {
+        event: "tool_defines_verb_json_success",
+        requestId,
+        arg: arg || undefined
+      });
+
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(parsed, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("@defines-verb-json execution failed", {
+        event: "tool_defines_verb_json_execution_error",
+        requestId,
+        arg: arg || undefined,
+        error: error.message
+      });
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "defines_prop_json") {
+    const argRaw = request.params.arguments?.arg;
+    if (argRaw !== undefined && argRaw !== null && typeof argRaw !== "string") {
+      const result = { error: "`arg` must be a string when provided." };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const arg = String(argRaw ?? "").trim();
+    const command = arg ? `@defines-prop-json ${arg}` : "@defines-prop-json";
+
+    logger.info("MOO defines-prop-json requested", {
+      event: "tool_defines_prop_json_request",
+      requestId,
+      arg: arg || undefined
+    });
+
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = { error: error.message || "MOO session is not logged in." };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_defines_prop_json_not_logged_in",
+        requestId,
+        arg: arg || undefined
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const captured = await mooSession.runCommandCaptureUntilIdle(
+        command,
+        config.idleCaptureMs,
+        config.firstResponseTimeoutMs
+      );
+      const parsed = parseJsonObjectOutput(captured.output);
+      if (!parsed) {
+        const result = {
+          error: "unable to parse result into json",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error("Failed to parse @defines-prop-json output", {
+          event: "tool_defines_prop_json_parse_error",
+          requestId,
+          arg: arg || undefined
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      if (Object.prototype.hasOwnProperty.call(parsed, "error")) {
+        logger.info("@defines-prop-json returned verb-side error payload", {
+          event: "tool_defines_prop_json_verb_error",
+          requestId,
+          arg: arg || undefined
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(parsed, null, 2)
+            }
+          ]
+        };
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(parsed, "query") ||
+        !Object.prototype.hasOwnProperty.call(parsed, "result_count") ||
+        !Object.prototype.hasOwnProperty.call(parsed, "results")
+      ) {
+        const result = {
+          error: "unexpected @defines-prop-json response shape",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error("Invalid @defines-prop-json JSON shape", {
+          event: "tool_defines_prop_json_parse_error",
+          requestId,
+          arg: arg || undefined
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      logger.info("Successfully executed @defines-prop-json", {
+        event: "tool_defines_prop_json_success",
+        requestId,
+        arg: arg || undefined
+      });
+
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(parsed, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("@defines-prop-json execution failed", {
+        event: "tool_defines_prop_json_execution_error",
+        requestId,
+        arg: arg || undefined,
+        error: error.message
+      });
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
   if (request.params.name === "get-next-unreviewed-bug") {
     const evalCommand = ";$kaiju:bot_get_next_unreviewed_bug()";
 
@@ -2532,6 +3083,271 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         requestId,
         arg,
         property: property || undefined,
+        error: error.message
+      });
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "search-json") {
+    const args = request.params.arguments ?? {};
+    const help = args.help === true;
+    const typeRaw = args.type;
+    const type = typeRaw == null ? "" : String(typeRaw).trim();
+    const supportedTypes = new Set([
+      "rooms",
+      "exits",
+      "npcs",
+      "players",
+      "players-all",
+      "avatars",
+      "vehicles",
+      "jobs",
+      "attacks",
+      "channels",
+      "wares",
+      "things"
+    ]);
+
+    if (!help && !type) {
+      const result = {
+        error: "`type` must be a non-empty string when `help` is not true."
+      };
+      logger.error("search-json validation failed", {
+        event: "tool_search_json_validation_error",
+        requestId,
+        help
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    if (!help && !supportedTypes.has(type)) {
+      const result = {
+        error:
+          "`type` must be one of: rooms, exits, npcs, players, players-all, avatars, vehicles, jobs, attacks, channels, wares, things."
+      };
+      logger.error("search-json validation failed", {
+        event: "tool_search_json_validation_error",
+        requestId,
+        help,
+        type
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const limitRaw = args.limit;
+    const hasLimit = limitRaw !== undefined;
+    const limit = Number(limitRaw);
+    if (hasLimit && (!Number.isInteger(limit) || limit <= 0)) {
+      const result = {
+        error: "`limit` must be a positive integer."
+      };
+      logger.error("search-json validation failed", {
+        event: "tool_search_json_validation_error",
+        requestId,
+        help,
+        type: type || undefined,
+        limit: limitRaw
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const extraFiltersRaw = args.extra_filters;
+    if (extraFiltersRaw !== undefined && !Array.isArray(extraFiltersRaw)) {
+      const result = {
+        error: "`extra_filters` must be an array of non-empty strings."
+      };
+      logger.error("search-json validation failed", {
+        event: "tool_search_json_validation_error",
+        requestId,
+        help,
+        type: type || undefined
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const extraFilters = (extraFiltersRaw ?? []).map((filter) => String(filter).trim());
+    if (extraFilters.some((filter) => filter.length === 0)) {
+      const result = {
+        error: "`extra_filters` must be an array of non-empty strings."
+      };
+      logger.error("search-json validation failed", {
+        event: "tool_search_json_validation_error",
+        requestId,
+        help,
+        type: type || undefined
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const commandParts = [];
+    if (help) {
+      commandParts.push("@search-json", "--help");
+    } else {
+      commandParts.push("@search-json", type);
+
+      const appendFilter = (key, value) => {
+        const normalized = value == null ? "" : String(value).trim();
+        if (normalized) {
+          commandParts.push(`${key}=${normalized}`);
+        }
+      };
+
+      appendFilter("n", args.name);
+      appendFilter("l", args.location);
+      appendFilter("p", args.parent);
+      appendFilter("a", args.sic);
+      appendFilter("prop", args.prop);
+      appendFilter("mutex", args.mutex);
+      appendFilter("w", args.moved_by);
+
+      if (args.generics_only === true) {
+        commandParts.push("-g");
+      }
+
+      if (args.mementos_only === true) {
+        commandParts.push("-m");
+      }
+
+      if (hasLimit) {
+        commandParts.push(`limit=${limit}`);
+      }
+
+      commandParts.push(...extraFilters);
+    }
+
+    const command = commandParts.join(" ");
+
+    logger.info("MOO search-json requested", {
+      event: "tool_search_json_request",
+      requestId,
+      help,
+      type: help ? undefined : type,
+      command
+    });
+
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = { error: error.message || "MOO session is not logged in." };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_search_json_not_logged_in",
+        requestId,
+        help,
+        type: help ? undefined : type
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const captured = await mooSession.runCommandCaptureUntilIdle(
+        command,
+        config.idleCaptureMs,
+        config.firstResponseTimeoutMs
+      );
+      const parsed = parseJsonObjectOutput(captured.output);
+
+      if (!parsed) {
+        const result = {
+          error: "unable to parse result into json",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error("Failed to parse @search-json output", {
+          event: "tool_search_json_parse_error",
+          requestId,
+          help,
+          type: help ? undefined : type
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      logger.info("Successfully executed @search-json", {
+        event: "tool_search_json_success",
+        requestId,
+        help,
+        type: help ? undefined : type
+      });
+
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(parsed, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("@search-json execution failed", {
+        event: "tool_search_json_execution_error",
+        requestId,
+        help,
+        type: help ? undefined : type,
         error: error.message
       });
       const result = { error: error.message };
