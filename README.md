@@ -2,9 +2,18 @@
 
 A lightweight MCP server for connecting to a MOO.
 
+## Run Modes
+
+This server supports two runtime modes:
+
+- `stdio` (default): existing behavior, fully backward compatible.
+- `http_shared`: runs as a local Streamable HTTP MCP daemon so multiple local agents can use the same process, MOO connection, and command queue.
+
+If you do nothing, it still runs exactly as before in `stdio` mode.
+
 ## Requirements
 
-1. Node 22 (might work on earlier versions by 22 for sure works)
+1. Node 22
 
 ## Warning
 
@@ -26,29 +35,125 @@ Slack Slither your IP and ask him to whitelist it for connecting directly to the
 
 ## Installation
 
-Clone the repo locally and then:
+Clone the repo locally, then:
 
-```
+```bash
 npm install
 cp .env.example .env
 ```
 
-Edit the .env file and add your user and password for your MOO bot
+Edit `./.env` and add your user and password for your MOO bot.
 
-## Adding to Codex
+Core mode settings:
 
-You don't need to directly add it to codex, there is a config file in the MOO-Codex repo which will do it for you.
+- `mcp-mode=stdio` (default)
+- `mcp-mode=http_shared`
+- `mcp-http-host=127.0.0.1` and `mcp-http-port=3000` (used only in `http_shared`)
 
-## Utilizing
+Optional execution tuning:
 
-You need to get the MOO-codex repo as well. This contains the 'brains' of the integration.
+- `moo-idle-ms` (default `1000`)
+- `moo-first-response-timeout-ms` (default `2000`)
+- `moo-code-search-timeout-ms` (default `15000`)
+
+In `http_shared` mode, host is restricted to localhost (`127.0.0.1`, `localhost`, or `::1`) so it only accepts connections from the same computer.
+
+## Running in `http_shared` Mode (Shared Local MCP Daemon)
+
+This is optional. The default is still `stdio`.
+
+1. In `./.env`, set:
+
+```ini
+mcp-mode=http_shared
+mcp-http-host=127.0.0.1
+mcp-http-port=1337
+```
+
+2. Start this server from the `moo-mcp` repo root:
+
+```bash
+npm run start
+```
+
+3. In the `moo-codex` repo, update `./.codex/config.toml` to use the HTTP endpoint instead of spawning this process over stdio:
+
+```toml
+[mcp_servers.moo]
+url = "http://127.0.0.1:1337/mcp"
+```
+
+4. Restart Codex from the `moo-codex` repo so it picks up the updated MCP config.
+
+## Running in `http_shared` Mode with `supervisord`
+
+Use this if you want `moo-mcp` to start on boot and auto-restart if it exits.
+
+1. In `./.env`, make sure shared HTTP mode is enabled:
+
+```ini
+mcp-mode=http_shared
+mcp-http-host=127.0.0.1
+mcp-http-port=1337
+```
+
+2. Review `./moo-mcp.conf` and verify:
+- `command` points to your Node binary (for example, from `which node`).
+- `directory` points to your local `moo-mcp` path.
+
+3. Symlink the included Supervisor config into `conf.d`:
+
+```bash
+sudo ln -sf /opt/moo-mcp/moo-mcp.conf /etc/supervisor/conf.d/moo-mcp.conf
+```
+
+4. Reload Supervisor and start the service:
+
+```bash
+sudo supervisorctl reread
+sudo supervisorctl update
+sudo supervisorctl start moo-mcp
+```
+
+Common commands:
+
+```bash
+sudo supervisorctl status moo-mcp
+sudo supervisorctl restart moo-mcp
+sudo supervisorctl stop moo-mcp
+```
+
+Logs:
+
+- App log: `./logs/mcp.log`
+- Supervisor stdout: `./logs/supervisor-moo-mcp.out.log`
+- Supervisor stderr: `./logs/supervisor-moo-mcp.err.log`
+
+## Codex Integration
+
+You also need the `moo-codex` repo, which contains the integration prompts/flows.
 
 Clone that repo: [MOO Codex](https://github.com/sevenecks/moo-codex)
 
 Inside that repo:
 
-- Update the .codex/config.toml file to the correct path to your MOO MCP folder
-- run 'codex' from the command line
-- connect to development MOO on your bit and confirm your MOOBot is online
+- For `stdio`, keep the existing spawned-process MCP config.
+- For `http_shared`, set:
+  - `[mcp_servers.moo]`
+  - `url = "http://127.0.0.1:<port>/mcp"`
+- Run `codex` from the command line
+- Connect to development MOO and confirm your MOOBot is online.
 
-If you want to see what it see's on the MOO, you can ask a $justice to help you monitor it directly.
+## Troubleshooting
+
+- Handshake/content-type errors:
+  - Confirm `mcp-mode=http_shared`.
+  - Confirm URL is exactly `http://127.0.0.1:<port>/mcp`.
+  - Restart Codex after MCP config changes.
+- Connection/session errors with multiple agents:
+  - Restart `moo-mcp` and Codex so all clients open fresh sessions.
+  - Check `./logs/mcp.log` for `mcp_session_created` and per-connection `connectionId` entries.
+- Supervisor not picking up changes:
+  - Run `sudo supervisorctl reread` then `sudo supervisorctl update`.
+
+If you want to observe bot-side behavior on the MOO directly, ask a `$justice` to help monitor the bot connection.
