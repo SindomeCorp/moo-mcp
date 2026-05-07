@@ -1509,6 +1509,22 @@ const listToolsHandler = async () => {
         }
       },
       {
+        name: "view-traceback-json",
+        description:
+          "Runs `@view-traceback-json <traceback_id>` and returns the parsed JSON object.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            traceback_id: {
+              type: "integer",
+              description: "Traceback id as a positive integer."
+            }
+          },
+          required: ["traceback_id"],
+          additionalProperties: false
+        }
+      },
+      {
         name: "submit_bug",
         description:
           "Runs `;$kaiju:bot_submit_bug(SUBJECT, BODY, TRACEBACK_JSON_TEXT)` where subject is a string, body is a string or list of strings, and optional traceback_json_text must be valid JSON text (multi-line accepted and normalized to one line).",
@@ -1562,6 +1578,22 @@ const listToolsHandler = async () => {
             }
           },
           required: ["bug_id", "comment"],
+          additionalProperties: false
+        }
+      },
+      {
+        name: "update-llm-reviewed-timestamp",
+        description:
+          "Runs `;$error:update_llm_reviewed_timestamp(traceback_id)` and returns success when return value is non-zero.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            traceback_id: {
+              type: "integer",
+              description: "Traceback id as a positive integer."
+            }
+          },
+          required: ["traceback_id"],
           additionalProperties: false
         }
       },
@@ -1790,8 +1822,10 @@ const callToolHandler = async (request, extra) => {
     request.params.name !== "get-next-unreviewed-bug" &&
     request.params.name !== "next-unreviewed-traceback-json" &&
     request.params.name !== "resolve-traceback" &&
+    request.params.name !== "view-traceback-json" &&
     request.params.name !== "submit_bug" &&
     request.params.name !== "submit_bug_comment" &&
+    request.params.name !== "update-llm-reviewed-timestamp" &&
     request.params.name !== "show-json" &&
     request.params.name !== "search-json" &&
     request.params.name !== "run_moo_eval" &&
@@ -3152,6 +3186,114 @@ const callToolHandler = async (request, extra) => {
     }
   }
 
+  if (request.params.name === "view-traceback-json") {
+    let tracebackId;
+    try {
+      tracebackId = validatePositiveInteger(request.params.arguments?.traceback_id, "traceback_id");
+    } catch (error) {
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const command = `@view-traceback-json ${tracebackId}`;
+
+    logger.info("MOO view-traceback-json requested", {
+      event: "tool_view_traceback_json_request",
+      requestId,
+      tracebackId
+    });
+
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = { error: error.message || "MOO session is not logged in." };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_view_traceback_json_not_logged_in",
+        requestId,
+        tracebackId
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const captured = await mooSession.runCommandCaptureUntilIdle(
+        command,
+        config.idleCaptureMs,
+        config.firstResponseTimeoutMs
+      );
+      const parsed = parseJsonObjectOutput(captured.output);
+      if (!parsed) {
+        const result = {
+          error: "unable to parse result into json",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error("Failed to parse @view-traceback-json output", {
+          event: "tool_view_traceback_json_parse_error",
+          requestId,
+          tracebackId
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      logger.info("Successfully executed @view-traceback-json", {
+        event: "tool_view_traceback_json_success",
+        requestId,
+        tracebackId
+      });
+
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(parsed, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("@view-traceback-json execution failed", {
+        event: "tool_view_traceback_json_execution_error",
+        requestId,
+        tracebackId,
+        error: error.message
+      });
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
   if (request.params.name === "submit_bug") {
     let subjectLiteral;
     let bodyLiteral;
@@ -3454,6 +3596,171 @@ const callToolHandler = async (request, extra) => {
         event: "tool_submit_bug_comment_execution_error",
         requestId,
         bugId,
+        error: error.message
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "update-llm-reviewed-timestamp") {
+    let tracebackId;
+    try {
+      tracebackId = validatePositiveInteger(request.params.arguments?.traceback_id, "traceback_id");
+    } catch (error) {
+      const result = {
+        error: true,
+        reason: error.message
+      };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const evalCommand = `;$error:update_llm_reviewed_timestamp(${tracebackId})`;
+
+    logger.info("MOO update llm reviewed timestamp requested", {
+      event: "tool_update_llm_reviewed_timestamp_request",
+      requestId,
+      tracebackId
+    });
+
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = {
+        error: true,
+        reason: error.message || "MOO session is not logged in.",
+        traceback_id: tracebackId
+      };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_update_llm_reviewed_timestamp_not_logged_in",
+        requestId,
+        tracebackId
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const output = await mooSession.runCommandUntil(
+        evalCommand,
+        (buffer) => {
+          const normalized = buffer.replace(/\r\n/g, "\n");
+          const match = /(^|\r?\n)(\s*=>[^\r\n]*)(\r?\n|$)/m.exec(buffer);
+          if (!match) {
+            if (
+              /(?:^|\n)(?:Line\s+\d+:\s+[^\n]*\n)+\d+\s+error(?:s)?\.\s*$/i.test(normalized)
+            ) {
+              return { done: true };
+            }
+            return { done: false };
+          }
+
+          const returnStart = match.index + match[1].length;
+          const returnEnd = returnStart + match[2].length + match[3].length;
+          const trailing = buffer.slice(returnEnd).trim();
+          if (trailing.length > 0) {
+            return { done: false };
+          }
+
+          return { done: true, consumedChars: returnEnd };
+        },
+        LIST_TIMEOUT_MS
+      );
+      const parsedEval = parseEvalOutput(output, evalCommand);
+      if (parsedEval.error) {
+        logger.error("Failed to update llm reviewed timestamp", {
+          event: "tool_update_llm_reviewed_timestamp_eval_error",
+          requestId,
+          tracebackId
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(parsedEval, null, 2)
+            }
+          ]
+        };
+      }
+
+      const returnValue = String(parsedEval.return_value ?? "").trim().toLowerCase();
+      if (returnValue === "false" || returnValue === "0") {
+        const result = {
+          error: true,
+          reason: "update_llm_reviewed_timestamp returned failure.",
+          traceback_id: tracebackId,
+          return_value: parsedEval.return_value,
+          response_body: parsedEval.response_body,
+          raw_output: output
+        };
+        logger.error("update_llm_reviewed_timestamp returned failure", {
+          event: "tool_update_llm_reviewed_timestamp_false",
+          requestId,
+          tracebackId
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      const result = {
+        traceback_id: tracebackId,
+        return_value: parsedEval.return_value,
+        response_body: parsedEval.response_body
+      };
+      logger.info("Successfully updated llm reviewed timestamp", {
+        event: "tool_update_llm_reviewed_timestamp_success",
+        requestId,
+        tracebackId
+      });
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      const result = {
+        error: true,
+        reason: error.message,
+        traceback_id: tracebackId
+      };
+      logger.error("update_llm_reviewed_timestamp execution failed", {
+        event: "tool_update_llm_reviewed_timestamp_execution_error",
+        requestId,
+        tracebackId,
         error: error.message
       });
       return {
