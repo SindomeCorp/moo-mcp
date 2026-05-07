@@ -1162,6 +1162,58 @@ function textToMooStringList(rawText) {
   return `{${encoded.join(", ")}}`;
 }
 
+function toMooStringLiteral(value) {
+  return `"${escapeMooString(value)}"`;
+}
+
+function validateSubmitBotBody(rawBody) {
+  if (typeof rawBody === "string") {
+    if (!rawBody.trim()) {
+      throw new Error("`body` must be a non-empty string or a non-empty array of strings.");
+    }
+    return textToMooStringList(rawBody);
+  }
+
+  if (Array.isArray(rawBody)) {
+    if (rawBody.length === 0) {
+      throw new Error("`body` array must contain at least one string.");
+    }
+
+    const parts = rawBody.map((entry, index) => {
+      if (typeof entry !== "string") {
+        throw new Error(`\`body[${index}]\` must be a string.`);
+      }
+      return toMooStringLiteral(entry);
+    });
+    return `{${parts.join(", ")}}`;
+  }
+
+  throw new Error("`body` must be a string or an array of strings.");
+}
+
+function validateOptionalTracebackJsonText(rawValue) {
+  if (rawValue === undefined || rawValue === null) {
+    return toMooStringLiteral("");
+  }
+
+  if (typeof rawValue !== "string") {
+    throw new Error("`traceback_json_text` must be a string when provided.");
+  }
+
+  if (rawValue.length === 0) {
+    return toMooStringLiteral("");
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(rawValue);
+  } catch {
+    throw new Error("`traceback_json_text` must be valid JSON text when provided.");
+  }
+
+  return toMooStringLiteral(JSON.stringify(parsed));
+}
+
 function parseNextUnreviewedBugResult(returnValueRaw) {
   const value = String(returnValueRaw ?? "").trim().toLowerCase();
 
@@ -1431,6 +1483,68 @@ const listToolsHandler = async () => {
         }
       },
       {
+        name: "next-unreviewed-traceback-json",
+        description:
+          "Runs `@next-unreviewed-traceback-json` with no arguments and returns the parsed JSON object.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          additionalProperties: false
+        }
+      },
+      {
+        name: "resolve-traceback",
+        description:
+          "Runs `@resolve-traceback <id>` where `id` is an integer, and returns the parsed JSON object.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: {
+              type: "integer",
+              description: "Traceback id as an integer."
+            }
+          },
+          required: ["id"],
+          additionalProperties: false
+        }
+      },
+      {
+        name: "submit_bug",
+        description:
+          "Runs `;$kaiju:bot_submit_bug(SUBJECT, BODY, TRACEBACK_JSON_TEXT)` where subject is a string, body is a string or list of strings, and optional traceback_json_text must be valid JSON text (multi-line accepted and normalized to one line).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            subject: {
+              type: "string",
+              description: "Required non-empty subject string (max 255 characters).",
+              maxLength: 255
+            },
+            body: {
+              description: "Required body as either a string or an array of strings.",
+              oneOf: [
+                {
+                  type: "string"
+                },
+                {
+                  type: "array",
+                  items: {
+                    type: "string"
+                  }
+                }
+              ]
+            },
+            traceback_json_text: {
+              type: "string",
+              description:
+                "Optional JSON text string for traceback data. Must be valid JSON; multi-line input is accepted and normalized to a single-line JSON string."
+            }
+          },
+          required: ["subject", "body"],
+          additionalProperties: false
+        }
+      },
+      {
         name: "submit_bug_comment",
         description:
           "Runs `;$kaiju:bot_submit_comment(<bug_id>, <moo_comment_list>)` where comment text is converted internally into a MOO list of strings.",
@@ -1674,6 +1788,9 @@ const callToolHandler = async (request, extra) => {
     request.params.name !== "defines_verb_json" &&
     request.params.name !== "defines_prop_json" &&
     request.params.name !== "get-next-unreviewed-bug" &&
+    request.params.name !== "next-unreviewed-traceback-json" &&
+    request.params.name !== "resolve-traceback" &&
+    request.params.name !== "submit_bug" &&
     request.params.name !== "submit_bug_comment" &&
     request.params.name !== "show-json" &&
     request.params.name !== "search-json" &&
@@ -2828,6 +2945,345 @@ const callToolHandler = async (request, extra) => {
         requestId,
         error: error.message
       });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "next-unreviewed-traceback-json") {
+    const command = "@next-unreviewed-traceback-json";
+
+    logger.info("MOO next-unreviewed-traceback-json requested", {
+      event: "tool_next_unreviewed_traceback_json_request",
+      requestId
+    });
+
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = { error: error.message || "MOO session is not logged in." };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_next_unreviewed_traceback_json_not_logged_in",
+        requestId
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const captured = await mooSession.runCommandCaptureUntilIdle(
+        command,
+        config.idleCaptureMs,
+        config.firstResponseTimeoutMs
+      );
+      const parsed = parseJsonObjectOutput(captured.output);
+      if (!parsed) {
+        const result = {
+          error: "unable to parse result into json",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error("Failed to parse @next-unreviewed-traceback-json output", {
+          event: "tool_next_unreviewed_traceback_json_parse_error",
+          requestId
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      logger.info("Successfully executed @next-unreviewed-traceback-json", {
+        event: "tool_next_unreviewed_traceback_json_success",
+        requestId
+      });
+
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(parsed, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("@next-unreviewed-traceback-json execution failed", {
+        event: "tool_next_unreviewed_traceback_json_execution_error",
+        requestId,
+        error: error.message
+      });
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "resolve-traceback") {
+    let tracebackId;
+    try {
+      tracebackId = validatePositiveInteger(request.params.arguments?.id, "id");
+    } catch (error) {
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const command = `@resolve-traceback ${tracebackId}`;
+
+    logger.info("MOO resolve-traceback requested", {
+      event: "tool_resolve_traceback_request",
+      requestId,
+      id: tracebackId
+    });
+
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = { error: error.message || "MOO session is not logged in." };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_resolve_traceback_not_logged_in",
+        requestId,
+        id: tracebackId
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const captured = await mooSession.runCommandCaptureUntilIdle(
+        command,
+        config.idleCaptureMs,
+        config.firstResponseTimeoutMs
+      );
+      const parsed = parseJsonObjectOutput(captured.output);
+      if (!parsed) {
+        const result = {
+          error: "unable to parse result into json",
+          truncated_response: truncateResponse(captured.output)
+        };
+        logger.error("Failed to parse @resolve-traceback output", {
+          event: "tool_resolve_traceback_parse_error",
+          requestId,
+          id: tracebackId
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2)
+            }
+          ]
+        };
+      }
+
+      logger.info("Successfully executed @resolve-traceback", {
+        event: "tool_resolve_traceback_success",
+        requestId,
+        id: tracebackId
+      });
+
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(parsed, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("@resolve-traceback execution failed", {
+        event: "tool_resolve_traceback_execution_error",
+        requestId,
+        id: tracebackId,
+        error: error.message
+      });
+      const result = { error: error.message };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+  }
+
+  if (request.params.name === "submit_bug") {
+    let subjectLiteral;
+    let bodyLiteral;
+    let tracebackJsonTextLiteral;
+
+    try {
+      const subject = String(request.params.arguments?.subject ?? "");
+      if (!subject.trim()) {
+        throw new Error("`subject` must be a non-empty string.");
+      }
+      if (subject.length > 255) {
+        throw new Error("`subject` must be at most 255 characters.");
+      }
+
+      subjectLiteral = toMooStringLiteral(subject);
+      bodyLiteral = validateSubmitBotBody(request.params.arguments?.body);
+      tracebackJsonTextLiteral = validateOptionalTracebackJsonText(
+        request.params.arguments?.traceback_json_text
+      );
+    } catch (error) {
+      const result = {
+        error: true,
+        reason: error.message
+      };
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    const evalCommand = `;$kaiju:bot_submit_bug(${subjectLiteral}, ${bodyLiteral}, ${tracebackJsonTextLiteral})`;
+
+    logger.info("MOO submit_bot requested", {
+      event: "tool_submit_bot_request",
+      requestId
+    });
+
+    try {
+      await mooSession.ensureConnectedAndLoggedIn();
+    } catch (error) {
+      const result = {
+        error: true,
+        reason: error.message || "MOO session is not logged in."
+      };
+      logger.error("MOO session is not logged in.", {
+        event: "tool_submit_bot_not_logged_in",
+        requestId
+      });
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2)
+          }
+        ]
+      };
+    }
+
+    try {
+      const output = await mooSession.runCommandUntil(
+        evalCommand,
+        (buffer) => {
+          const normalized = buffer.replace(/\r\n/g, "\n");
+          const match = /(^|\r?\n)(\s*=>[^\r\n]*)(\r?\n|$)/m.exec(buffer);
+          if (!match) {
+            if (
+              /(?:^|\n)(?:Line\s+\d+:\s+[^\n]*\n)+\d+\s+error(?:s)?\.\s*$/i.test(normalized)
+            ) {
+              return { done: true };
+            }
+            return { done: false };
+          }
+
+          const returnStart = match.index + match[1].length;
+          const returnEnd = returnStart + match[2].length + match[3].length;
+          const trailing = buffer.slice(returnEnd).trim();
+          if (trailing.length > 0) {
+            return { done: false };
+          }
+
+          return { done: true, consumedChars: returnEnd };
+        },
+        LIST_TIMEOUT_MS
+      );
+
+      const parsedEval = parseEvalOutput(output, evalCommand);
+      if (parsedEval.error) {
+        logger.error("Failed to parse eval output for submit_bot", {
+          event: "tool_submit_bot_eval_error",
+          requestId
+        });
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(parsedEval, null, 2)
+            }
+          ]
+        };
+      }
+
+      logger.info("Successfully executed submit_bot", {
+        event: "tool_submit_bot_success",
+        requestId
+      });
+
+      return {
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(parsedEval, null, 2)
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error("submit_bot execution failed", {
+        event: "tool_submit_bot_execution_error",
+        requestId,
+        error: error.message
+      });
+      const result = {
+        error: true,
+        reason: error.message
+      };
       return {
         isError: true,
         content: [
