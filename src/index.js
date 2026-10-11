@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { buildSearchCommand } from "./search-command.js";
+import { captureSearchResponse, searchResponseResult } from "./search-response.js";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -55,6 +56,7 @@ const config = {
       "MOO_FIRST_RESPONSE_TIMEOUT_MS"
     ]) ?? DEFAULT_FIRST_RESPONSE_TIMEOUT_MS
   ),
+  searchTimeoutMs: Number(readEnv(["moo-search-timeout-ms", "MOO_SEARCH_TIMEOUT_MS"]) ?? 15000),
   codeSearchTimeoutMs: Number(
     readEnv(["moo-code-search-timeout-ms", "MOO_CODE_SEARCH_TIMEOUT_MS"]) ??
       DEFAULT_CODE_SEARCH_TIMEOUT_MS
@@ -97,6 +99,10 @@ if (
   throw new Error(
     "Invalid first response timeout. Set moo-first-response-timeout-ms (or MOO_FIRST_RESPONSE_TIMEOUT_MS) to a positive number."
   );
+}
+
+if (!Number.isInteger(config.searchTimeoutMs) || config.searchTimeoutMs < 1 || config.searchTimeoutMs > 120000) {
+  throw new Error("Invalid search timeout. Set moo-search-timeout-ms (or MOO_SEARCH_TIMEOUT_MS) to 1..120000 milliseconds.");
 }
 
 if (!Number.isFinite(config.codeSearchTimeoutMs) || config.codeSearchTimeoutMs <= 0) {
@@ -506,6 +512,21 @@ class MooTelnetSession {
           return { output, timed_out_waiting_for_first_line: false };
         }
       }
+    });
+  }
+
+  async runSearchCapture(command, idleMs, firstResponseTimeoutMs, totalTimeoutMs) {
+    return this.enqueue(async () => {
+      if (!this.socket || !this.connected) throw new Error("MOO connection is not open.");
+      this.buffer = "";
+      this.sendLine(command);
+      const captured = await captureSearchResponse({
+        readOutput: () => this.buffer,
+        isConnected: () => this.connected,
+        idleMs, firstResponseTimeoutMs, totalTimeoutMs
+      });
+      this.buffer = "";
+      return captured;
     });
   }
 
@@ -4077,51 +4098,22 @@ const callToolHandler = async (request, extra) => {
     }
 
     try {
-      const captured = await mooSession.runCommandCaptureUntilIdle(
+      const captured = await mooSession.runSearchCapture(
         command,
         config.idleCaptureMs,
-        config.firstResponseTimeoutMs
+        config.firstResponseTimeoutMs,
+        config.searchTimeoutMs
       );
-      const parsed = parseJsonObjectOutput(captured.output);
-
-      if (!parsed) {
-        const result = {
-          error: "unable to parse result into json",
-          truncated_response: truncateResponse(captured.output)
-        };
-        logger.error("Failed to parse @search-json output", {
-          event: "tool_search_json_parse_error",
-          requestId,
-          help,
-          type: help ? undefined : type
-        });
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2)
-            }
-          ]
-        };
-      }
-
-      logger.info("Successfully executed @search-json", {
-        event: "tool_search_json_success",
+      const result = searchResponseResult(captured, parseJsonObjectOutput, { secrets: [config.password] });
+      logger.info("MOO search-json capture finished", {
+        event: "tool_search_json_capture",
         requestId,
         help,
-        type: help ? undefined : type
+        type: help ? undefined : type,
+        isError: result.isError,
+        ...captured.capture
       });
-
-      return {
-        isError: false,
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(parsed, null, 2)
-          }
-        ]
-      };
+      return result;
     } catch (error) {
       logger.error("@search-json execution failed", {
         event: "tool_search_json_execution_error",

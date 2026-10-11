@@ -161,6 +161,59 @@ separators. Raw `run_moo_command` syntax remains the caller's responsibility.
 
 Run local regression checks with `npm test` and `npm run check`.
 
+## Search response diagnostics
+
+The `search-json` handler distinguishes transport capture problems from MOO results:
+
+| Outcome | MCP result |
+| --- | --- |
+| No bytes before the first-response deadline | `isError=true`, `error=moo_response_timeout` |
+| Output continues until the total deadline | `isError=true`, `error=moo_response_timeout`; partial preview retained |
+| Connection closes during capture | `isError=true`, `error=moo_connection_closed` |
+| Idle capture contains only whitespace | `isError=true`, `error=moo_empty_response` |
+| Idle capture has an unclosed JSON object/string | `isError=true`, `error=moo_incomplete_response` |
+| Other output cannot be parsed as a JSON object | `isError=true`, `error=moo_invalid_json` |
+| Valid MOO error JSON (`ok=0` or truthy `error`) | Original MOO payload preserved, `isError=true` |
+| Valid successful JSON, including an empty results list | Original MOO payload preserved, `isError=false` |
+
+Existing first-response and idle settings retain their defaults and behavior.
+Search capture now also has a total deadline: `moo-search-timeout-ms` (alias
+`MOO_SEARCH_TIMEOUT_MS`), default 15000, integer range 1..120000 milliseconds.
+This bounds continuous output; it does not add a delay to normal calls. The earliest
+applicable deadline wins. Other tools' capture paths are unchanged.
+
+Capture diagnostics report stop reason, elapsed capture time (excluding queue wait),
+first-byte observation time, all three wait settings, and received character count.
+The existing `timed_out_waiting_for_first_line` name is retained in this metadata,
+but receipt detection is based on bytes/text arriving, not a newline. Timing uses a
+poll interval of at most 50 ms. Parsed results carry this metadata in MCP
+`_meta.moo_capture`; transport/parse errors carry it in their JSON `capture` field.
+
+Error previews preserve at most 1000 characters after redacting the configured MOO
+password and stripping terminal controls. `preview_truncated` explicitly reports
+preview truncation; it does not claim that the server truncated its response.
+New capture log records contain timing/count metadata, not response contents.
+
+Idle is not a completion marker. Unclosed JSON is evidence of potentially incomplete
+output, not proof that more will arrive. Timeout never means an empty search result
+or a canceled MOO task. No automatic retry or connection takeover is performed.
+The existing protocol has no request identifier on MOO response lines; late output
+can still complicate attribution to a subsequent command. This change reports capture
+uncertainty and does not solve server-task cancellation or response framing.
+
+Local validation uses deterministic simulated response timing; it opens no additional
+MOO connection. The read-only live baseline returned Generic TERRA Armband #8536,
+an empty result for `zzzzNoSuchTerraItem94721`, and `invalid_property_filter` for
+`prop=description`, all with cached searches limited to 3. The running process was
+not restarted to test the new capture implementation.
+
+Activation requires separate approval: review and commit/push the scoped change,
+then run `sudo supervisorctl restart moo-mcp` and `sudo supervisorctl status moo-mcp`.
+Verify a plain typed `TERRA armband` cached search, a known empty search, and a malformed
+property search through the actual MCP tool. Successful payloads should remain
+unchanged; the malformed property result should now have MCP `isError=true`.
+Do not induce slow searches or mutation retries to test timeouts on the shared server.
+
 ## Troubleshooting
 
 - Handshake/content-type errors:
