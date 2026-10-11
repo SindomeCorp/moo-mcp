@@ -144,6 +144,23 @@ Inside that repo:
 - Run `codex` from the command line
 - Connect to development MOO and confirm your MOOBot is online.
 
+## Structured search strings
+
+`search-json` accepts ordinary string values, including multiword names. For example:
+
+```json
+{"type":"things","name":"TERRA armband","generics_only":true,"limit":3,"extra_filters":["backend=cache"]}
+```
+
+The connector quotes and escapes typed filter values for the MOO command parser.
+Supply the intended text directly; embedded quote characters are treated as literal
+search characters, not caller-provided command syntax. Control characters and line
+separators are rejected. `extra_filters` retains its raw command-token contract
+(including caller-provided quoting), but also rejects control characters and line
+separators. Raw `run_moo_command` syntax remains the caller's responsibility.
+
+Run local regression checks with `npm test` and `npm run check`.
+
 ## Troubleshooting
 
 - Handshake/content-type errors:

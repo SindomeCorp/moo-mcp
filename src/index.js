@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { buildSearchCommand } from "./search-command.js";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -1622,7 +1623,7 @@ const listToolsHandler = async () => {
       {
         name: "search-json",
         description:
-          "Runs @search-json --help or @search-json <type> [filters], then parses and returns the JSON object response.",
+          "Runs @search-json --help or @search-json <type> [filters], then parses and returns the JSON object response. Typed filter strings are literal values: do not add command quotes. Control characters and line separators are rejected.",
         inputSchema: {
           type: "object",
           properties: {
@@ -4036,43 +4037,15 @@ const callToolHandler = async (request, extra) => {
       };
     }
 
-    const commandParts = [];
-    if (help) {
-      commandParts.push("@search-json", "--help");
-    } else {
-      commandParts.push("@search-json", type);
-
-      const appendFilter = (key, value) => {
-        const normalized = value == null ? "" : String(value).trim();
-        if (normalized) {
-          commandParts.push(`${key}=${normalized}`);
-        }
+    let command;
+    try {
+      command = buildSearchCommand(args);
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: JSON.stringify({ error: error.message }) }]
       };
-
-      appendFilter("n", args.name);
-      appendFilter("l", args.location);
-      appendFilter("p", args.parent);
-      appendFilter("a", args.sic);
-      appendFilter("prop", args.prop);
-      appendFilter("mutex", args.mutex);
-      appendFilter("w", args.moved_by);
-
-      if (args.generics_only === true) {
-        commandParts.push("-g");
-      }
-
-      if (args.mementos_only === true) {
-        commandParts.push("-m");
-      }
-
-      if (hasLimit) {
-        commandParts.push(`limit=${limit}`);
-      }
-
-      commandParts.push(...extraFilters);
     }
-
-    const command = commandParts.join(" ");
 
     logger.info("MOO search-json requested", {
       event: "tool_search_json_request",
