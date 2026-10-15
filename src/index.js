@@ -1,9 +1,9 @@
 import fs from "node:fs";
+import { sanitizeLogInfo } from "./sanitized-log.js";
 import { buildSearchCommand } from "./search-command.js";
-import { captureSearchResponse, searchResponseResult } from "./search-response.js";
-import net from "node:net";
+import { searchResponseResult } from "./search-response.js";
+import { MooTelnetSession, commandContext } from "./moo-session.js";
 import { randomUUID } from "node:crypto";
-import { once } from "node:events";
 import process from "node:process";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -18,12 +18,7 @@ import winston from "winston";
 
 dotenv.config();
 
-const DONE_MARKER = "### Done ###";
 const LIST_TIMEOUT_MS = 15000;
-const LOGIN_TIMEOUT_MS = 10000;
-const LOGIN_IDLE_MS = 500;
-const KEEP_ALIVE_INTERVAL_MS = 5 * 60 * 1000;
-const KEEP_ALIVE_TEXT = "#$# Ping!";
 const DEFAULT_IDLE_CAPTURE_MS = 1000;
 const DEFAULT_FIRST_RESPONSE_TIMEOUT_MS = 2000;
 const DEFAULT_CODE_SEARCH_TIMEOUT_MS = 15000;
@@ -170,6 +165,7 @@ const consoleFormat = winston.format.combine(
 
 const logger = winston.createLogger({
   level: "info",
+  format: winston.format(sanitizeLogInfo)(),
   transports: [
     new winston.transports.Console({
       format: consoleFormat,
@@ -181,528 +177,6 @@ const logger = winston.createLogger({
 });
 const baseLogger = logger;
 
-class MooTelnetSession {
-  constructor({ host, port, username, password, logger: log }) {
-    this.host = host;
-    this.port = port;
-    this.username = username;
-    this.password = password;
-    this.logger = log;
-
-    this.socket = null;
-    this.connected = false;
-    this.loggedIn = false;
-    this.pending = null;
-    this.buffer = "";
-    this.commandQueue = Promise.resolve();
-    this.keepAliveTimer = null;
-    this.reconnectPromise = null;
-    this.pendingQueueDepth = 0;
-  }
-
-  async connectAndLogin() {
-    this.close();
-    this.buffer = "";
-
-    this.socket = net.createConnection({
-      host: this.host,
-      port: this.port
-    });
-
-    this.socket.setEncoding("binary");
-    this.socket.on("data", (chunk) => this.onData(Buffer.from(chunk, "binary")));
-    this.socket.on("error", (error) => {
-      this.logger.error("MOO socket error", { event: "moo_socket_error", error: error.message });
-      this.rejectPending(error);
-    });
-    this.socket.on("close", () => {
-      const wasConnected = this.connected;
-      this.connected = false;
-      this.loggedIn = false;
-      this.stopKeepAlive();
-      this.rejectPending(new Error("MOO connection closed."));
-
-      if (wasConnected) {
-        this.logger.error("MOO connection closed", { event: "moo_connection_closed" });
-      }
-    });
-
-    await once(this.socket, "connect");
-    this.connected = true;
-    this.logger.info("Connected to MOO", {
-      event: "moo_connected",
-      host: this.host,
-      port: this.port
-    });
-
-    this.sendLine(`connect ${this.username} ${this.password}`);
-    const loginOutput = await this.readUntilIdle(LOGIN_TIMEOUT_MS, LOGIN_IDLE_MS);
-
-    const loginFailed = /incorrect|different password|no such player|invalid|denied|failed/i.test(
-      loginOutput
-    );
-
-    if (loginFailed) {
-      this.loggedIn = false;
-      this.logger.error("MOO login failed", { event: "moo_login_failed", output: loginOutput });
-      return;
-    }
-
-    this.loggedIn = true;
-    this.startKeepAlive();
-    this.logger.info("Logged into MOO", { event: "moo_logged_in", user: this.username });
-  }
-
-  async ensureConnectedAndLoggedIn() {
-    if (this.socket && this.connected && this.loggedIn) {
-      return;
-    }
-
-    if (!this.reconnectPromise) {
-      this.reconnectPromise = this.enqueue(async () => {
-        if (this.socket && this.connected && this.loggedIn) {
-          return;
-        }
-
-        this.logger.warn("MOO session unavailable; reconnecting", {
-          event: "moo_reconnect_attempt"
-        });
-        await this.connectAndLogin();
-
-        if (!this.socket || !this.connected || !this.loggedIn) {
-          throw new Error("MOO session is not logged in.");
-        }
-
-        this.logger.info("MOO session reconnected", { event: "moo_reconnect_success" });
-      }).finally(() => {
-        this.reconnectPromise = null;
-      });
-    }
-
-    return this.reconnectPromise;
-  }
-
-  startKeepAlive() {
-    this.stopKeepAlive();
-
-    this.keepAliveTimer = setInterval(() => {
-      if (!this.socket || !this.connected || !this.loggedIn || this.pending) {
-        return;
-      }
-
-      this.socket.write(`${KEEP_ALIVE_TEXT}\n`, (error) => {
-        if (error) {
-          this.logger.warn("Failed to send MOO keep alive", {
-            event: "moo_keep_alive_failed",
-            error: error.message
-          });
-          return;
-        }
-
-        this.logger.debug("MOO keep alive sent", { event: "moo_keep_alive_sent" });
-      });
-    }, KEEP_ALIVE_INTERVAL_MS);
-  }
-
-  stopKeepAlive() {
-    if (!this.keepAliveTimer) {
-      return;
-    }
-
-    clearInterval(this.keepAliveTimer);
-    this.keepAliveTimer = null;
-  }
-
-  onData(bufferChunk) {
-    const cleanBuffer = this.filterTelnetNegotiation(bufferChunk);
-    if (cleanBuffer.length === 0) {
-      return;
-    }
-
-    const text = cleanBuffer.toString("utf8");
-    this.buffer += text;
-    this.tryResolvePending();
-  }
-
-  filterTelnetNegotiation(chunk) {
-    const IAC = 255;
-    const DONT = 254;
-    const DO = 253;
-    const WONT = 252;
-    const WILL = 251;
-    const SB = 250;
-    const SE = 240;
-
-    const output = [];
-    const responses = [];
-
-    for (let i = 0; i < chunk.length; i += 1) {
-      const byte = chunk[i];
-      if (byte !== IAC) {
-        output.push(byte);
-        continue;
-      }
-
-      const command = chunk[i + 1];
-      if (command === SB) {
-        i += 2;
-        while (i < chunk.length) {
-          if (chunk[i] === IAC && chunk[i + 1] === SE) {
-            i += 1;
-            break;
-          }
-          i += 1;
-        }
-        continue;
-      }
-
-      const option = chunk[i + 2];
-      if (command === DO || command === DONT) {
-        responses.push(Buffer.from([IAC, WONT, option]));
-        i += 2;
-        continue;
-      }
-
-      if (command === WILL || command === WONT) {
-        responses.push(Buffer.from([IAC, DONT, option]));
-        i += 2;
-        continue;
-      }
-
-      i += 1;
-    }
-
-    if (responses.length > 0 && this.socket && this.connected) {
-      this.socket.write(Buffer.concat(responses));
-    }
-
-    return Buffer.from(output);
-  }
-
-  async runCommand(command, timeoutMs = LIST_TIMEOUT_MS) {
-    return this.enqueue(async () => {
-      if (!this.socket || !this.connected) {
-        throw new Error("MOO connection is not open.");
-      }
-
-      const requestId = randomUUID();
-      const payload = `${command.trim()}\n`;
-
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-          if (this.pending && this.pending.requestId === requestId) {
-            this.pending = null;
-          }
-          reject(new Error(`Timed out waiting for command completion marker: ${DONE_MARKER}`));
-        }, timeoutMs);
-
-        this.pending = {
-          requestId,
-          marker: DONE_MARKER,
-          resolve: (value) => {
-            clearTimeout(timer);
-            resolve(value);
-          },
-          reject: (error) => {
-            clearTimeout(timer);
-            reject(error);
-          }
-        };
-
-        this.socket.write(payload, (error) => {
-          if (!error) {
-            this.tryResolvePending();
-            return;
-          }
-
-          if (this.pending && this.pending.requestId === requestId) {
-            this.pending = null;
-          }
-          clearTimeout(timer);
-          reject(error);
-        });
-      });
-    });
-  }
-
-  async runCommandUntil(command, isComplete, timeoutMs = LIST_TIMEOUT_MS) {
-    return this.enqueue(async () => {
-      if (!this.socket || !this.connected) {
-        throw new Error("MOO connection is not open.");
-      }
-
-      const requestId = randomUUID();
-      const payload = `${command.trim()}\n`;
-
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-          if (this.pending && this.pending.requestId === requestId) {
-            this.pending = null;
-          }
-          reject(new Error("Timed out waiting for command completion."));
-        }, timeoutMs);
-
-        this.pending = {
-          requestId,
-          marker: null,
-          resolve: (value) => {
-            clearTimeout(timer);
-            resolve(value);
-          },
-          reject: (error) => {
-            clearTimeout(timer);
-            reject(error);
-          },
-          isComplete
-        };
-
-        this.socket.write(payload, (error) => {
-          if (!error) {
-            this.tryResolvePending();
-            return;
-          }
-
-          if (this.pending && this.pending.requestId === requestId) {
-            this.pending = null;
-          }
-          clearTimeout(timer);
-          reject(error);
-        });
-      });
-    });
-  }
-
-  async runCommandCaptureUntilIdle(command, idleMs, firstResponseTimeoutMs) {
-    return this.enqueue(async () => {
-      if (!this.socket || !this.connected) {
-        throw new Error("MOO connection is not open.");
-      }
-
-      this.buffer = "";
-      this.sendLine(command);
-
-      const start = Date.now();
-      let lastChangeAt = start;
-      let started = false;
-      let seenLength = this.buffer.length;
-
-      while (true) {
-        await new Promise((resolve) => {
-          setTimeout(resolve, 50);
-        });
-
-        const now = Date.now();
-        const currentLength = this.buffer.length;
-
-        if (currentLength !== seenLength) {
-          seenLength = currentLength;
-          lastChangeAt = now;
-          if (currentLength > 0) {
-            started = true;
-          }
-        }
-
-        if (!started && now - start >= firstResponseTimeoutMs) {
-          return { output: "", timed_out_waiting_for_first_line: true };
-        }
-
-        if (started && now - lastChangeAt >= idleMs) {
-          const output = this.buffer.trim();
-          this.buffer = "";
-          return { output, timed_out_waiting_for_first_line: false };
-        }
-      }
-    });
-  }
-
-  async runSearchCapture(command, idleMs, firstResponseTimeoutMs, totalTimeoutMs) {
-    return this.enqueue(async () => {
-      if (!this.socket || !this.connected) throw new Error("MOO connection is not open.");
-      this.buffer = "";
-      this.sendLine(command);
-      const captured = await captureSearchResponse({
-        readOutput: () => this.buffer,
-        isConnected: () => this.connected,
-        idleMs, firstResponseTimeoutMs, totalTimeoutMs
-      });
-      this.buffer = "";
-      return captured;
-    });
-  }
-
-  async runCommandCaptureFragmentsUntilIdle(command, idleMs, firstResponseTimeoutMs) {
-    return this.enqueue(async () => {
-      if (!this.socket || !this.connected) {
-        throw new Error("MOO connection is not open.");
-      }
-
-      this.buffer = "";
-      this.sendLine(command);
-
-      const start = Date.now();
-      let lastChangeAt = start;
-      let started = false;
-      let seenLength = this.buffer.length;
-      const fragments = [];
-
-      while (true) {
-        await new Promise((resolve) => {
-          setTimeout(resolve, 50);
-        });
-
-        const now = Date.now();
-        const currentLength = this.buffer.length;
-
-        if (currentLength !== seenLength) {
-          const rawFragment = this.buffer.slice(seenLength, currentLength);
-          const nextFragment = rawFragment
-            .replace(/(?:\r?\n)+$/g, "");
-          fragments.push(nextFragment);
-          seenLength = currentLength;
-          lastChangeAt = now;
-          if (currentLength > 0) {
-            started = true;
-          }
-        }
-
-        if (!started && now - start >= firstResponseTimeoutMs) {
-          return {
-            output: "",
-            timed_out_waiting_for_first_line: true
-          };
-        }
-
-        if (started && now - lastChangeAt >= idleMs) {
-          this.buffer = "";
-          return {
-            output: fragments.join(""),
-            timed_out_waiting_for_first_line: false
-          };
-        }
-      }
-    });
-  }
-
-  enqueue(work) {
-    this.pendingQueueDepth += 1;
-    const enqueuedAt = Date.now();
-    const wrappedWork = async () => {
-      const queueWaitMs = Date.now() - enqueuedAt;
-      this.logger.info("Dequeued MOO command", {
-        event: "moo_command_dequeued",
-        queueDepthAtDequeue: this.pendingQueueDepth,
-        queueWaitMs
-      });
-      try {
-        return await work();
-      } finally {
-        this.pendingQueueDepth = Math.max(0, this.pendingQueueDepth - 1);
-      }
-    };
-
-    this.logger.info("Enqueued MOO command", {
-      event: "moo_command_enqueued",
-      queueDepth: this.pendingQueueDepth
-    });
-
-    this.commandQueue = this.commandQueue.then(wrappedWork, wrappedWork);
-    return this.commandQueue;
-  }
-
-  sendLine(line) {
-    if (!this.socket || !this.connected) {
-      throw new Error("MOO connection is not open.");
-    }
-    this.socket.write(`${line.trim()}\n`);
-  }
-
-  async readUntilIdle(timeoutMs, idleMs) {
-    const start = Date.now();
-    let lastChange = Date.now();
-    let previousLength = this.buffer.length;
-
-    while (Date.now() - start < timeoutMs) {
-      await new Promise((resolve) => {
-        setTimeout(resolve, 50);
-      });
-
-      if (this.buffer.length !== previousLength) {
-        previousLength = this.buffer.length;
-        lastChange = Date.now();
-      }
-
-      if (Date.now() - lastChange >= idleMs) {
-        const output = this.buffer.trim();
-        this.buffer = "";
-        return output;
-      }
-    }
-
-    const output = this.buffer.trim();
-    this.buffer = "";
-    return output;
-  }
-
-  tryResolvePending() {
-    if (!this.pending) {
-      return;
-    }
-
-    if (typeof this.pending.isComplete === "function") {
-      const outcome = this.pending.isComplete(this.buffer);
-      if (!outcome?.done) {
-        return;
-      }
-
-      const consumed = Number.isInteger(outcome.consumedChars)
-        ? Math.max(0, outcome.consumedChars)
-        : this.buffer.length;
-      const result = this.buffer.slice(0, consumed);
-      this.buffer = this.buffer.slice(consumed);
-
-      const { resolve } = this.pending;
-      this.pending = null;
-      resolve(result.trim());
-      return;
-    }
-
-    const markerIndex = this.buffer.indexOf(this.pending.marker);
-    if (markerIndex === -1) {
-      return;
-    }
-
-    const result = this.buffer.slice(0, markerIndex);
-    this.buffer = this.buffer.slice(markerIndex + this.pending.marker.length);
-
-    const { resolve } = this.pending;
-    this.pending = null;
-    resolve(result.trim());
-  }
-
-  rejectPending(error) {
-    if (!this.pending) {
-      return;
-    }
-
-    const { reject } = this.pending;
-    this.pending = null;
-    reject(error);
-  }
-
-  close() {
-    this.stopKeepAlive();
-    this.rejectPending(new Error("MOO connection closed."));
-
-    if (this.socket) {
-      this.socket.end();
-      this.socket.destroy();
-      this.socket = null;
-    }
-
-    this.connected = false;
-    this.loggedIn = false;
-  }
-}
 
 function buildErrorResult(reason, rawOutput, objectRef, verbName) {
   return {
@@ -1301,7 +775,10 @@ const mooSession = new MooTelnetSession({
   port: config.port,
   username: config.username,
   password: config.password,
-  logger
+  logger,
+  loginSuccessMarker: readEnv(["MOO_LOGIN_SUCCESS_MARKER"]),
+  connectTimeoutMs: 10000,
+  captureTimeoutMs: 30000
 });
 
 await mooSession.connectAndLogin();
@@ -1858,7 +1335,7 @@ const callToolHandler = async (request, extra) => {
     throw new Error(`Unknown tool: ${request.params.name}`);
   }
 
-  const requestId = randomUUID();
+  const requestId = commandContext.getStore()?.requestId ?? randomUUID();
 
   if (request.params.name === "get_moo_verb_source") {
     let objectRef;
@@ -4098,13 +3575,20 @@ const callToolHandler = async (request, extra) => {
     }
 
     try {
+      let result;
       const captured = await mooSession.runSearchCapture(
         command,
         config.idleCaptureMs,
         config.firstResponseTimeoutMs,
-        config.searchTimeoutMs
+        config.searchTimeoutMs,
+        capture => {
+          result = searchResponseResult(capture, parseJsonObjectOutput, { secrets: [config.password] });
+          const diagnostic = result.isError ? JSON.parse(result.content[0].text) : {};
+          return !["moo_incomplete_response", "moo_invalid_json", "moo_empty_response"].includes(diagnostic.error);
+        }
       );
-      const result = searchResponseResult(captured, parseJsonObjectOutput, { secrets: [config.password] });
+      // Non-idle captures already retired the stream inside the queue.
+      result ??= searchResponseResult(captured, parseJsonObjectOutput, { secrets: [config.password] });
       logger.info("MOO search-json capture finished", {
         event: "tool_search_json_capture",
         requestId,
@@ -4687,7 +4171,8 @@ function createConfiguredServer() {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, listToolsHandler);
-  server.setRequestHandler(CallToolRequestSchema, callToolHandler);
+  server.setRequestHandler(CallToolRequestSchema, (request, extra) =>
+    commandContext.run({ signal: extra.signal, requestId: randomUUID(), rpcRequestId: extra.requestId }, () => callToolHandler(request, extra)));
 
   return server;
 }
@@ -4760,20 +4245,24 @@ if (config.mcpMode === "stdio") {
     return session;
   };
 
-  const writeJsonRpcSessionError = (res, status, message) => {
+  const writeJsonRpcSessionError = (req, res, status, message) => {
     if (res.headersSent) {
       return;
     }
 
+    logger.warn("HTTP MCP session rejected", { event: "http_mcp_session_rejected", stage: "session", status, requestId: randomUUID() });
     res.status(status).json({
       jsonrpc: "2.0",
       error: {
         code: -32000,
         message
       },
-      id: null
+      id: rpcRequestId(req.body)
     });
   };
+
+  const rpcRequestId = (body) => body && !Array.isArray(body) &&
+    (typeof body.id === "string" || typeof body.id === "number") ? body.id : null;
 
   const mcpHandler = async (req, res) => {
     try {
@@ -4788,13 +4277,13 @@ if (config.mcpMode === "stdio") {
       const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
 
       if (!sessionId || !String(sessionId).trim()) {
-        writeJsonRpcSessionError(res, 400, "Bad Request: Mcp-Session-Id header is required");
+        writeJsonRpcSessionError(req, res, 400, "Bad Request: Mcp-Session-Id header is required");
         return;
       }
 
       const session = sessions.get(String(sessionId).trim());
       if (!session) {
-        writeJsonRpcSessionError(res, 404, "Session not found");
+        writeJsonRpcSessionError(req, res, 404, "Session not found");
         return;
       }
 
@@ -4811,7 +4300,7 @@ if (config.mcpMode === "stdio") {
             code: -32603,
             message: "Internal server error"
           },
-          id: null
+          id: rpcRequestId(req.body)
         });
       }
     }

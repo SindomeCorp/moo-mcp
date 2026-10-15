@@ -180,7 +180,8 @@ Existing first-response and idle settings retain their defaults and behavior.
 Search capture now also has a total deadline: `moo-search-timeout-ms` (alias
 `MOO_SEARCH_TIMEOUT_MS`), default 15000, integer range 1..120000 milliseconds.
 This bounds continuous output; it does not add a delay to normal calls. The earliest
-applicable deadline wins. Other tools' capture paths are unchanged.
+applicable deadline wins. Legacy captures and queue waits are now bounded as described
+in the transport-hardening rollout section below.
 
 Capture diagnostics report stop reason, elapsed capture time (excluding queue wait),
 first-byte observation time, all three wait settings, and received character count.
@@ -196,23 +197,21 @@ New capture log records contain timing/count metadata, not response contents.
 
 Idle is not a completion marker. Unclosed JSON is evidence of potentially incomplete
 output, not proof that more will arrive. Timeout never means an empty search result
-or a canceled MOO task. No automatic retry or connection takeover is performed.
+or a canceled MOO task. No automatic command retry is performed. Uncertain streams
+are now retired; the next explicit request may reconnect as described below.
 The existing protocol has no request identifier on MOO response lines; late output
 can still complicate attribution to a subsequent command. This change reports capture
 uncertainty and does not solve server-task cancellation or response framing.
 
-Local validation uses deterministic simulated response timing; it opens no additional
-MOO connection. The read-only live baseline returned Generic TERRA Armband #8536,
+Historical validation of the earlier search-only change used simulated timing.
+Its read-only live baseline returned Generic TERRA Armband #8536,
 an empty result for `zzzzNoSuchTerraItem94721`, and `invalid_property_filter` for
 `prop=description`, all with cached searches limited to 3. The running process was
 not restarted to test the new capture implementation.
 
-Activation requires separate approval: review and commit/push the scoped change,
-then run `sudo supervisorctl restart moo-mcp` and `sudo supervisorctl status moo-mcp`.
-Verify a plain typed `TERRA armband` cached search, a known empty search, and a malformed
-property search through the actual MCP tool. Successful payloads should remain
-unchanged; the malformed property result should now have MCP `isError=true`.
-Do not induce slow searches or mutation retries to test timeouts on the shared server.
+Activation requires separate approval and the verified login marker described in the
+transport-hardening rollout section below. Do not induce slow searches or mutation
+retries to test timeouts on the shared server.
 
 ## Troubleshooting
 
@@ -221,9 +220,66 @@ Do not induce slow searches or mutation retries to test timeouts on the shared s
   - Confirm URL is exactly `http://127.0.0.1:<port>/mcp`.
   - Restart Codex after MCP config changes.
 - Connection/session errors with multiple agents:
-  - Restart `moo-mcp` and Codex so all clients open fresh sessions.
+  - Reinitialize expired MCP sessions first; a backend restart requires operator approval.
   - Check `./logs/mcp.log` for `mcp_session_created` and per-connection `connectionId` entries.
 - Supervisor not picking up changes:
   - Run `sudo supervisorctl reread` then `sudo supervisorctl update`.
 
 If you want to observe bot-side behavior on the MOO directly, ask a `$justice` to help monitor the bot connection.
+
+## Transport hardening rollout (requires separate deployment approval)
+
+This branch is not a production deployment. Before activation, an operator must verify
+an exact, stable text marker emitted **only after successful authentication** by this
+MOO, and configure `MOO_LOGIN_SUCCESS_MARKER` to that literal text. A generic welcome
+banner is not sufficient. There is deliberately no guessed default. Without a marker,
+startup fails before opening a TCP connection. Do not paste credentials, full banners,
+or private account information into logs or review artifacts. Confirm the marker on
+both initial login and reconnect in a controlled operator session before rollout.
+
+Bounds and behavior:
+
+- TCP connection establishment has a 10-second deadline; login confirmation plus
+  login-output drain share the existing 10-second login budget.
+- Commands have a 30-second cumulative queue-wait budget across reconnect preflight
+  and command enqueue. Own execution time is separate. Busy/expired or cancelled queued
+  work is removed logically and can never execute later; deadline checks also run at dequeue.
+- Legacy idle captures use a 30-second total ceiling, raised only to the configured
+  first-response wait plus idle window if those existing settings require it. This bounds
+  continuous output without shortening the configured initial/idle waits. Search keeps
+  its existing total deadline. Marker-based commands retain their existing deadlines.
+- Timeout, disconnect, explicit MCP cancellation, ambiguous write failure, and invalid
+  or incomplete search JSON retire the affected TCP stream before another queued command
+  can use it. No command is retried or replayed. The next explicit request can reconnect;
+  already queued work that depended on the retired connection can fail safely.
+- Successful idle capture remains a heuristic; idle alone cannot prove command completion.
+  Late output after a seemingly successful raw idle capture remains a protocol limitation.
+  Interactive raw-command workflows retain their connection on ordinary idle success.
+- HTTP disconnect alone does not cancel MCP work. Explicit `notifications/cancelled`
+  and SDK session shutdown signals cancel it. Closing one idle MCP session does not close
+  the shared MOO connection or invalidate other MCP sessions.
+- Missing MCP session headers still return HTTP 400 and unknown/expired sessions HTTP
+  404. Error responses now retain a valid string/numeric JSON-RPC request ID (including 0).
+  `server/discover` is unsupported: a valid initialized session receives SDK `-32601`.
+  Pre-session discovery receives the required session error, not invented discovery support.
+- Lifecycle logs include generated request IDs, stage, queue wait, duration and status.
+  A central allowlist removes command arguments, response contents, login/user data and
+  exception messages from console and file logs. Tool responses retain their existing data.
+
+Validation is entirely offline against fake TCP/MOO servers and ephemeral localhost MCP
+listeners. No production `.env` is needed. From this worktree, use the installed Node 22:
+
+```sh
+PATH=/home/example/.nvm/versions/node/v22.22.2/bin:$PATH npm test
+PATH=/home/example/.nvm/versions/node/v22.22.2/bin:$PATH npm run check
+```
+
+After separately approved rollout, initialize a fresh MCP session, list tools and run
+one harmless `search-json` help call. Do not deliberately stall or mutate the live MOO
+to test failure handling. Preserve the previous commit/config for operator rollback.
+Backend restart invalidates previous MCP HTTP session IDs; clients must initialize again.
+
+This change cannot repair upstream tunnel control-plane 503/504 errors. On recurrence,
+compare direct initialization/list-tools/help with a tunneled equivalent and correlate
+UTC times with `the tunnel service`: upstream poll failures without a matching local
+request remain evidence of a separate tunnel path problem.

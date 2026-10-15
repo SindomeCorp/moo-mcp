@@ -1,0 +1,128 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import net from 'node:net';
+import { EventEmitter } from 'node:events';
+import { MooTelnetSession, commandContext } from '../src/moo-session.js';
+const logger = { info(){}, warn(){}, error(){}, debug(){} };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const make = options => new MooTelnetSession({ host:'127.0.0.1', port:1, username:'fake', password:'fake', loginSuccessMarker:'LOGIN_OK', logger, ...options });
+test('queued work expires promptly while active work remains blocked and never executes', async () => {
+  const s=make({queueTimeoutMs:30}); let release, executed=false;
+  const first=s.enqueue(()=>new Promise(r=>release=r));
+  await sleep(1);
+  const second=s.enqueue(()=>{executed=true});
+  await assert.rejects(second,/busy/);
+  assert.equal(executed,false); assert.equal(s.pendingQueueDepth,1);
+  release(); await first; await s.commandQueue;
+  assert.equal(executed,false); assert.equal(s.pendingQueueDepth,0);
+});
+test('queued cancellation never executes; running cancellation closes stream without replay', async()=>{
+  const s=make(); let release, executed=false;
+  const first=s.enqueue(()=>new Promise(r=>release=r)); await sleep(1);
+  const controller=new AbortController();
+  const second=commandContext.run({signal:controller.signal},()=>s.enqueue(()=>executed=true));
+  controller.abort(); await assert.rejects(second,/cancelled/); release(); await first; await s.commandQueue;
+  assert.equal(executed,false);
+});
+test('TCP connect deadline destroys hanging socket and cleans transient listeners', async()=>{
+  const socket=new EventEmitter(); socket.setEncoding=()=>{}; socket.end=()=>{};
+  socket.destroy=()=>{socket.destroyed=true; queueMicrotask(()=>socket.emit('close'));};
+  const s=make({connectTimeoutMs:15,createConnection:()=>socket});
+  await assert.rejects(s.connectAndLogin(),/deadline/);
+  assert.equal(socket.destroyed,true); assert.equal(socket.listenerCount('connect'),0);
+  assert.equal(s.connected,false);
+});
+async function fake(t, onLine){
+  const sockets=new Set();
+  const server=net.createServer(socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));
+    let buffer=''; socket.on('data',data=>{buffer+=data; let i; while((i=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,i);buffer=buffer.slice(i+1);onLine(socket,line);}});
+  });
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  t.after(()=>{for(const socket of sockets)socket.destroy();server.close();});
+  const s=make({port:server.address().port, loginSuccessMarker:'LOGIN_OK'});t.after(()=>s.close());return s;
+}
+test('positive login confirmation and reconnect ignore stale old socket close',async t=>{
+  const s=await fake(t,(socket,line)=>{if(line.startsWith('connect '))socket.write('LOGIN_OK\n');});
+  await s.connectAndLogin(); assert.equal(s.loggedIn,true);
+  const old=s.socket; await s.connectAndLogin(); old.emit('close');
+  assert.equal(s.loggedIn,true); assert.equal(s.connected,true);
+});
+test('login rejection does not log server content and closes socket',async t=>{
+  const s=await fake(t,(socket)=>socket.write('incorrect password private-output\n'));
+  await assert.rejects(s.connectAndLogin(),/rejected/); assert.equal(s.loggedIn,false);assert.equal(s.socket,null);
+});
+test('unconfigured confirmation fails closed',async t=>{
+  const s=await fake(t,()=>{});s.loginSuccessMarker=undefined;
+  await assert.rejects(s.connectAndLogin(),/not configured/);assert.equal(s.connected,false);
+});
+test('marker deadline discards late bytes and never retries command',async t=>{
+  let calls=0;
+  const s=await fake(t,(socket,line)=>{if(line.startsWith('connect '))socket.write('LOGIN_OK\n');else{calls++;setTimeout(()=>{if(!socket.destroyed)socket.write('late ### Done ###');},60);}});
+  await s.connectAndLogin();await assert.rejects(s.runCommand('fake-command',20),/Timed out/);
+  assert.equal(s.connected,false);await sleep(70);assert.equal(s.buffer,'');assert.equal(calls,1);
+});
+test('both legacy capture loops bound continuous data and discard uncertain stream',async t=>{
+  for(const method of ['runCommandCaptureUntilIdle','runCommandCaptureFragmentsUntilIdle']){
+    const s=await fake(t,(socket,line)=>{if(line.startsWith('connect '))socket.write('LOGIN_OK\n');else{const timer=setInterval(()=>socket.write('x'),5);socket.on('close',()=>clearInterval(timer));}});
+    await s.connectAndLogin();s.captureTimeoutMs=80;
+    await assert.rejects(s[method]('fake-command',20,20),/total capture/);assert.equal(s.connected,false);
+  }
+});
+test('active explicit cancellation aborts marker read and queue recovers',async t=>{
+  const s=await fake(t,(socket,line)=>{if(line.startsWith('connect '))socket.write('LOGIN_OK\n');});
+  await s.connectAndLogin();const controller=new AbortController();
+  const result=commandContext.run({signal:controller.signal},()=>s.runCommand('fake-command'));
+  await sleep(10);controller.abort();await assert.rejects(result,/closed|cancelled/);
+  assert.equal(s.connected,false);assert.equal(s.pendingQueueDepth,0);
+});
+
+test('marker followed by delayed rejection never authenticates',async t=>{
+  const s=await fake(t,(socket)=>{socket.write('LOGIN_OK\n');setTimeout(()=>socket.write('denied\n'),80);});
+  await assert.rejects(s.connectAndLogin(),/rejected/);assert.equal(s.loggedIn,false);
+});
+test('queue wait budget is shared across preflight and command',async()=>{
+  const s=make({queueTimeoutMs:60});let release;
+  const blocker=s.enqueue(()=>new Promise(r=>release=r));await sleep(1);
+  const ctx={};let execute=false;
+  const preflight=commandContext.run(ctx,()=>s.enqueue(()=>{}));
+  await sleep(40);release();await blocker;await preflight;
+  const nextBlock=s.enqueue(()=>new Promise(r=>release=r));await sleep(1);
+  const command=commandContext.run(ctx,()=>s.enqueue(()=>execute=true));
+  await assert.rejects(command,/busy/);assert.equal(execute,false);
+  release();await nextBlock;await s.commandQueue;assert.equal(execute,false);
+});
+test('empty legacy response is an error and retires stream',async t=>{
+  const s=await fake(t,(socket,line)=>{if(line.startsWith('connect '))socket.write('LOGIN_OK\n');});
+  await s.connectAndLogin();await assert.rejects(s.runCommandCaptureUntilIdle('fake-command',10,10),/first response/);
+  assert.equal(s.connected,false);
+});
+test('callback-only partial write errors retire marker and idle streams',async()=>{
+  for(const method of ['runCommand','runCommandUntil','runCommandCaptureUntilIdle']){
+    const s=make();s.connected=true;s.loggedIn=true;
+    const socket={write(_payload,callback){queueMicrotask(()=>callback(new Error('fake write failure')));},end(){},destroy(){}};
+    s.socket=socket;
+    const result=method==='runCommandUntil'?s[method]('fake',()=>({done:false}),100):s[method]('fake',100,100);
+    await assert.rejects(result,/failure|closed/);assert.equal(s.connected,false);
+  }
+});
+test('cancel during login closes socket; next explicit reconnect succeeds',async t=>{
+  let attempts=0;
+  const s=await fake(t,(socket,line)=>{if(line.startsWith('connect ') && ++attempts>1)socket.write('LOGIN_OK\n');});
+  const controller=new AbortController();const result=commandContext.run({signal:controller.signal},()=>s.ensureConnectedAndLoggedIn());
+  await sleep(40);controller.abort();await assert.rejects(result,/closed|cancelled/);assert.equal(s.connected,false);
+  await s.ensureConnectedAndLoggedIn();assert.equal(s.loggedIn,true);assert.equal(attempts,2);
+});
+test('queue deadline is checked even before overdue timer callback runs',async()=>{
+  const s=make({queueTimeoutMs:10});let ran=false;
+  const result=s.enqueue(()=>ran=true);const until=Date.now()+20;while(Date.now()<until){}
+  await assert.rejects(result,/busy/);assert.equal(ran,false);
+  assert.equal(make().queueTimeoutMs,30000);
+});
+test('incomplete search validation retires socket before next queued work can start',async t=>{
+  const s=await fake(t,(socket,line)=>{if(line.startsWith('connect '))socket.write('LOGIN_OK\n');else socket.write('{partial');});
+  await s.connectAndLogin();
+  const result=s.runSearchCapture('fake-search',10,100,200,()=>false);
+  let nextConnected;
+  const next=s.enqueue(()=>{nextConnected=s.connected;});
+  await result;await next;assert.equal(nextConnected,false);
+});
