@@ -776,7 +776,6 @@ const mooSession = new MooTelnetSession({
   username: config.username,
   password: config.password,
   logger,
-  loginSuccessMarker: readEnv(["MOO_LOGIN_SUCCESS_MARKER"]),
   connectTimeoutMs: 10000,
   captureTimeoutMs: 30000
 });

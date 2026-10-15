@@ -209,8 +209,8 @@ an empty result for `zzzzNoSuchTerraItem94721`, and `invalid_property_filter` fo
 `prop=description`, all with cached searches limited to 3. The running process was
 not restarted to test the new capture implementation.
 
-Activation requires separate approval and the verified login marker described in the
-transport-hardening rollout section below. Do not induce slow searches or mutation
+Activation requires separate approval as described in the transport-hardening rollout
+section below. Do not induce slow searches or mutation
 retries to test timeouts on the shared server.
 
 ## Troubleshooting
@@ -229,18 +229,19 @@ If you want to observe bot-side behavior on the MOO directly, ask a `$justice` t
 
 ## Transport hardening rollout (requires separate deployment approval)
 
-This branch is not a production deployment. Before activation, an operator must verify
-an exact, stable text marker emitted **only after successful authentication** by this
-MOO, and configure `MOO_LOGIN_SUCCESS_MARKER` to that literal text. A generic welcome
-banner is not sufficient. There is deliberately no guessed default. Without a marker,
-startup fails before opening a TCP connection. Do not paste credentials, full banners,
-or private account information into logs or review artifacts. Confirm the marker on
-both initial login and reconnect in a controlled operator session before rollout.
+This branch is not a production deployment. Login requires no new marker setting or
+probe command. For compatibility, after sending the configured login command the client
+captures output until 500 ms of silence, with a 10-second total login-capture deadline.
+The existing known failure patterns (`incorrect`, `different password`, `no such player`,
+`invalid`, `denied`, `failed`, case-insensitive) reject login. Otherwise `loggedIn` records
+assumed readiness, even for a silent response; it is not positive authentication proof.
+The first tool command establishes actual usability. A disconnected or continuously
+streaming login fails and retires its socket. No automatic command replay is introduced.
 
 Bounds and behavior:
 
-- TCP connection establishment has a 10-second deadline; login confirmation plus
-  login-output drain share the existing 10-second login budget.
+- TCP connection establishment has a 10-second deadline, followed by the bounded
+  10-second login capture described above.
 - Commands have a 30-second cumulative queue-wait budget across reconnect preflight
   and command enqueue. Own execution time is separate. Busy/expired or cancelled queued
   work is removed logically and can never execute later; deadline checks also run at dequeue.

@@ -10,11 +10,10 @@ const LOGIN_IDLE_MS = 500;
 const KEEP_ALIVE_INTERVAL_MS = 5 * 60 * 1000;
 const KEEP_ALIVE_TEXT = "#$# Ping!";
 export class MooTelnetSession {
-  constructor({ host, port, username, password, logger: log, connectTimeoutMs = 10000, captureTimeoutMs = 30000, queueTimeoutMs = 30000, loginSuccessMarker, createConnection = net.createConnection }) {
+  constructor({ host, port, username, password, logger: log, connectTimeoutMs = 10000, captureTimeoutMs = 30000, queueTimeoutMs = 30000, createConnection = net.createConnection }) {
     this.connectTimeoutMs = connectTimeoutMs;
     this.captureTimeoutMs = captureTimeoutMs;
     this.queueTimeoutMs = queueTimeoutMs;
-    this.loginSuccessMarker = loginSuccessMarker;
     this.createConnection = createConnection;
     this.activeWork = false;
     this.host = host;
@@ -35,7 +34,6 @@ export class MooTelnetSession {
   }
 
   async connectAndLogin() {
-    if (!this.loginSuccessMarker) throw new Error("MOO login success marker is not configured.");
     this.close();
     this.buffer = "";
 
@@ -78,30 +76,18 @@ export class MooTelnetSession {
       });
       this.connected = true;
       this.logger.info("Connected to MOO", { event: "moo_connected", stage: "connect" });
-      if (!this.loginSuccessMarker) throw new Error("MOO login success marker is not configured.");
       this.buffer = "";
       this.sendLine(`connect ${this.username} ${this.password}`);
-      const deadline = Date.now() + LOGIN_TIMEOUT_MS;
-      while (Date.now() < deadline) {
-        if (!this.connected) throw new Error("MOO connection closed during login.");
-        if (/incorrect|different password|no such player|invalid|denied|failed/i.test(this.buffer)) {
-          throw new Error("MOO login rejected.");
-        }
-        if (this.buffer.includes(this.loginSuccessMarker)) {
-          // Drain the login response before allowing commands to share the socket.
-          const drained = await this.readUntilIdle(Math.max(1, deadline - Date.now()), LOGIN_IDLE_MS);
-          if (/incorrect|different password|no such player|invalid|denied|failed/i.test(drained)) {
-            throw new Error("MOO login rejected.");
-          }
-          if (!this.connected) throw new Error("MOO connection closed during login.");
-          this.loggedIn = true;
-          this.startKeepAlive();
-          this.logger.info("Logged into MOO", { event: "moo_logged_in", stage: "login" });
-          return;
-        }
-        await new Promise(resolve => setTimeout(resolve, 25));
+      const loginOutput = await this.readUntilIdle(LOGIN_TIMEOUT_MS, LOGIN_IDLE_MS);
+      if (/incorrect|different password|no such player|invalid|denied|failed/i.test(loginOutput)) {
+        throw new Error("MOO login rejected.");
       }
-      throw new Error("MOO login confirmation deadline exceeded.");
+      if (!this.connected) throw new Error("MOO connection closed during login.");
+      // Compatibility: absence of a known failure assumes readiness, including silence.
+      // This is not authentication proof; the first tool command establishes usability.
+      this.loggedIn = true;
+      this.startKeepAlive();
+      this.logger.info("MOO login readiness assumed", { event: "moo_login_readiness_assumed", stage: "login" });
     } catch (error) {
       this.close();
       this.logger.warn("MOO connection/login failed", { event: "moo_login_failed", stage: "connect_login" });
