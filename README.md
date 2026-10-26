@@ -284,3 +284,14 @@ This change cannot repair upstream tunnel control-plane 503/504 errors. On recur
 compare direct initialization/list-tools/help with a tunneled equivalent and correlate
 UTC times with `the tunnel service`: upstream poll failures without a matching local
 request remain evidence of a separate tunnel path problem.
+
+## Node.js 26 validation
+
+Validated on Linux with **Node.js 26.12.1** on **2026-10-26**. The local regression suite and syntax checks passed using mocked MOO sessions and temporary local HTTP listeners.
+
+With Node.js 26.12.1 selected, reproduce the checks with:
+
+```sh
+npm test
+npm run check
+```
