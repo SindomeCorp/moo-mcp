@@ -787,7 +787,7 @@ const listToolsHandler = async () => {
     tools: [
       {
         name: "get_moo_verb_source",
-        description: "Fetches source code for a MOO verb via @list and parses source vs VMS notes.",
+        description: "Fetches source code for a MOO verb via @list and parses source vs VMS notes. Returns source_code separately from vms_notes: source_code alone is not a complete upload, and the rendered VMS NOTES heading is not MOO source. Before every full-source edit, including documentation/readability edits, capture complete original source and retain all existing bottom VMS NOTE strings, VMS VERSION, and Last modified annotations verbatim as upload input. If annotations are missing or conflicting, stop and reconcile before programming. Edit only the intended body; never assume save reconstructs omitted history. Use @program, full source with preserved annotations, dot, and one-line VMS note; let normal VMS save add the current note and update version/attribution. Immediately read back full source and verify retained note history, current note, updated attribution, and a nondecreasing version incremented as expected; executable-code and metadata checks alone are insufficient.",
         inputSchema: {
           type: "object",
           properties: {
@@ -807,7 +807,7 @@ const listToolsHandler = async () => {
       {
         name: "verb-data",
         description:
-          "Runs @verb-data <arg> where arg is obj:verb_spec (for example `#1234:look`, `#24608:@asdf`, or `#24608::\"_asdf\"`), parses JSON response, and enriches source.code from source.code_lines when available.",
+          "Runs @verb-data <arg> where arg is obj:verb_spec (for example `#1234:look`, `#24608:@asdf`, or `#24608::\"_asdf\"`), parses JSON response, and enriches source.code from source.code_lines when available. Before every full-source edit, including documentation/readability edits, capture complete original source and retain all existing bottom VMS NOTE strings, VMS VERSION, and Last modified annotations verbatim as upload input. If annotations are missing or conflicting, stop and reconcile before programming. Edit only the intended body; never assume save reconstructs omitted history. Use @program, full source with preserved annotations, dot, and one-line VMS note; let normal VMS save add the current note and update version/attribution. Immediately read back full source and verify retained note history, current note, updated attribution, and a nondecreasing version incremented as expected; executable-code and metadata checks alone are insufficient.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1188,7 +1188,7 @@ const listToolsHandler = async () => {
       {
         name: "run_moo_eval",
         description:
-          "Runs an eval expression on the MOO (for example `;parent(#22664)`) and returns body + return value.",
+          "Runs an eval expression on the MOO (for example `;parent(#22664)`) and returns body + return value. Eval payloads must be single-line. Do not use set_verb_code for normal edits; use the interactive save workflow through run_moo_command. Before every full-source edit, including documentation/readability edits, capture complete original source and retain all existing bottom VMS NOTE strings, VMS VERSION, and Last modified annotations verbatim as upload input. If annotations are missing or conflicting, stop and reconcile before programming. Edit only the intended body; never assume save reconstructs omitted history. Use @program, full source with preserved annotations, dot, and one-line VMS note; let normal VMS save add the current note and update version/attribution. Immediately read back full source and verify retained note history, current note, updated attribution, and a nondecreasing version incremented as expected; executable-code and metadata checks alone are insufficient.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1204,7 +1204,7 @@ const listToolsHandler = async () => {
       {
         name: "run_moo_command",
         description:
-          "Runs a raw MOO command and captures output until no new input arrives for a configured idle period.",
+          "Runs a raw MOO command and captures output until no new input arrives for a configured idle period. Do not use set_verb_code for normal edits or @abort to finish a save. Before every full-source edit, including documentation/readability edits, capture complete original source and retain all existing bottom VMS NOTE strings, VMS VERSION, and Last modified annotations verbatim as upload input. If annotations are missing or conflicting, stop and reconcile before programming. Edit only the intended body; never assume save reconstructs omitted history. Use @program, full source with preserved annotations, dot, and one-line VMS note; let normal VMS save add the current note and update version/attribution. Immediately read back full source and verify retained note history, current note, updated attribution, and a nondecreasing version incremented as expected; executable-code and metadata checks alone are insufficient.",
         inputSchema: {
           type: "object",
           properties: {

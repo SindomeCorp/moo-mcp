@@ -144,6 +144,37 @@ Inside that repo:
 - Run `codex` from the command line
 - Connect to development MOO and confirm your MOOBot is online.
 
+## Agent instructions for verb edits
+
+Read `AGENTS.md` and `playbook.md` in the `moo-codex` repository before using this
+connection for verb edits. These rules apply to every full-source upload, including
+documentation/readability-only edits:
+
+1. Capture the full original source before editing, including every bottom
+   `VMS NOTE` string, `VMS VERSION`, and `Last modified` annotation. Prefer
+   `verb-data` and verify the capture is complete. `get_moo_verb_source` separates
+   `source_code` from `vms_notes`; do not treat `source_code` alone as the complete
+   source or upload the rendered `VMS NOTES` heading as MOO code. If annotations
+   are missing or conflicting, stop and reconcile before programming.
+2. Edit only the intended body. Retain all existing bottom annotations verbatim
+   as input to every full-source upload. Never assume save reconstructs omitted
+   history: `$vms2:comment_code` uses the submitted version/history, and a missing
+   version defaults to `1.0`, which can regress generated versions.
+3. Use the interactive save flow: `@program <obj>:<verb>`, full source with the
+   preserved bottom annotations, `.` on its own line, then a one-line VMS note.
+   Let the normal VMS save add the current note and update version/attribution;
+   do not manually rewrite the preserved annotations. Do not use `set_verb_code`
+   for normal edits or `@abort` to finish a save.
+4. Immediately read back the full saved source and compare against the original.
+   Verify existing `VMS NOTE` history remains verbatim, the current note is present,
+   `VMS VERSION` has not decreased and has incremented as expected, and the normal
+   save updated `Last modified` attribution. Executable-code and metadata checks
+   alone are insufficient. Stop and reconcile any missing history, unexpected
+   version, or conflicting annotations before further programming or migration.
+
+These instructions govern caller behavior; the connector does not enforce footer
+preservation. See `docs/MOO_CODE_GOTCHAS.md`, sections 7 and 10, in `moo-codex`.
+
 ## Structured search strings
 
 `search-json` accepts ordinary string values, including multiword names. For example:
