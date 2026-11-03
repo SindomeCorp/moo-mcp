@@ -9,6 +9,8 @@ const LOGIN_TIMEOUT_MS = 10000;
 const LOGIN_IDLE_MS = 500;
 const KEEP_ALIVE_INTERVAL_MS = 5 * 60 * 1000;
 const KEEP_ALIVE_TEXT = "#$# Ping!";
+const SOCKET_ERROR_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "ECONNABORTED"]);
+const socketErrorCode = error => SOCKET_ERROR_CODES.has(error?.code) ? error.code : "unknown";
 export class MooTelnetSession {
   constructor({ host, port, username, password, logger: log, connectTimeoutMs = 10000, captureTimeoutMs = 30000, queueTimeoutMs = 30000, createConnection = net.createConnection }) {
     this.connectTimeoutMs = connectTimeoutMs;
@@ -31,28 +33,64 @@ export class MooTelnetSession {
     this.keepAliveTimer = null;
     this.reconnectPromise = null;
     this.pendingQueueDepth = 0;
+    this.socketId = null;
+    this.socketStartedAt = null;
+    this.lastReceivedAt = null;
+    this.lastSentAt = null;
+    this.activeContext = null;
+  }
+
+  connectionDiagnostic() {
+    const now = Date.now();
+    // Socket/timer callbacks inherit the context that originally opened the socket.
+    // Only the queue owner identifies the request currently using it.
+    const context = this.activeContext ?? {};
+    return {
+      pid: process.pid, socketId: this.socketId,
+      requestId: context.requestId, connectionId: context.connectionId, toolName: context.toolName,
+      socketAgeMs: this.socketStartedAt === null ? null : now - this.socketStartedAt,
+      receiveIdleMs: this.lastReceivedAt === null ? null : now - this.lastReceivedAt,
+      sendIdleMs: this.lastSentAt === null ? null : now - this.lastSentAt,
+      bytesRead: this.socket?.bytesRead ?? 0, bytesWritten: this.socket?.bytesWritten ?? 0,
+      bufferedChars: this.buffer.length, queueDepth: this.pendingQueueDepth,
+      activeWork: this.activeWork, loggedIn: this.loggedIn,
+      localPort: this.socket?.localPort
+    };
   }
 
   async connectAndLogin() {
-    this.close();
+    this.close("connection_replaced");
     this.buffer = "";
 
     const socket = this.createConnection({ host: this.host, port: this.port });
     this.socket = socket;
+    this.socketId = randomUUID();
+    this.socketStartedAt = Date.now();
+    this.lastReceivedAt = null;
+    this.lastSentAt = null;
+    this.logger.info("MOO connection attempt", { event: "moo_connect_attempt", ...this.connectionDiagnostic() });
     socket.setEncoding("binary");
     socket.on("data", (chunk) => {
-      if (this.socket === socket) this.onData(Buffer.from(chunk, "binary"));
-    });
-    socket.on("error", () => {
       if (this.socket === socket) {
-        this.logger.error("MOO socket error", { event: "moo_socket_error", stage: "socket" });
-        this.close();
+        this.lastReceivedAt = Date.now();
+        this.onData(Buffer.from(chunk, "binary"));
       }
     });
-    socket.on("close", () => {
+    socket.on("error", (error) => {
+      if (this.socket === socket) {
+        this.logger.error("MOO socket error", {
+          event: "moo_socket_error", ...this.connectionDiagnostic(), errorCode: socketErrorCode(error)
+        });
+        this.close("socket_error", { errorCode: socketErrorCode(error) });
+      }
+    });
+    socket.on("end", () => {
       if (this.socket !== socket) return;
-      this.logger.warn("MOO connection closed", { event: "moo_connection_closed" });
-      this.close();
+      this.logger.warn("MOO remote EOF", { event: "moo_socket_end", ...this.connectionDiagnostic() });
+    });
+    socket.on("close", (hadError) => {
+      if (this.socket !== socket) return;
+      this.close("remote_close", { hadError: Boolean(hadError) });
     });
     try {
       await new Promise((resolve, reject) => {
@@ -68,18 +106,19 @@ export class MooTelnetSession {
         const timer = setTimeout(() => {
           cleanup();
           reject(new Error("MOO TCP connect deadline exceeded."));
-          socket.destroy();
+          this.close("connect_timeout");
         }, this.connectTimeoutMs);
         socket.once("connect", connected);
         socket.once("error", failed);
         socket.once("close", closed);
       });
       this.connected = true;
-      this.logger.info("Connected to MOO", { event: "moo_connected", stage: "connect" });
+      this.logger.info("Connected to MOO", { event: "moo_connected", stage: "connect", ...this.connectionDiagnostic() });
       this.buffer = "";
       this.sendLine(`connect ${this.username} ${this.password}`);
       const loginOutput = await this.readUntilIdle(LOGIN_TIMEOUT_MS, LOGIN_IDLE_MS);
       if (/incorrect|different password|no such player|invalid|denied|failed/i.test(loginOutput)) {
+        this.close("login_rejected");
         throw new Error("MOO login rejected.");
       }
       if (!this.connected) throw new Error("MOO connection closed during login.");
@@ -87,9 +126,9 @@ export class MooTelnetSession {
       // This is not authentication proof; the first tool command establishes usability.
       this.loggedIn = true;
       this.startKeepAlive();
-      this.logger.info("MOO login readiness assumed", { event: "moo_login_readiness_assumed", stage: "login" });
+      this.logger.info("MOO login readiness assumed", { event: "moo_login_readiness_assumed", stage: "login", ...this.connectionDiagnostic() });
     } catch (error) {
-      this.close();
+      this.close("login_failed");
       this.logger.warn("MOO connection/login failed", { event: "moo_login_failed", stage: "connect_login" });
       throw error;
     }
@@ -116,16 +155,19 @@ export class MooTelnetSession {
         return;
       }
 
-      this.socket.write(`${KEEP_ALIVE_TEXT}\n`, (error) => {
+      const socket = this.socket;
+      this.lastSentAt = Date.now();
+      socket.write(`${KEEP_ALIVE_TEXT}\n`, (error) => {
+        if (this.socket !== socket) return;
         if (error) {
           this.logger.warn("Failed to send MOO keep alive", {
             event: "moo_keep_alive_failed",
-            error: error.message
+            ...this.connectionDiagnostic(), errorCode: socketErrorCode(error)
           });
           return;
         }
 
-        this.logger.debug("MOO keep alive sent", { event: "moo_keep_alive_sent" });
+        this.logger.info("MOO keep alive sent", { event: "moo_keep_alive_sent", ...this.connectionDiagnostic() });
       });
     }, KEEP_ALIVE_INTERVAL_MS);
   }
@@ -199,6 +241,7 @@ export class MooTelnetSession {
     }
 
     if (responses.length > 0 && this.socket && this.connected) {
+      this.lastSentAt = Date.now();
       this.socket.write(Buffer.concat(responses));
     }
 
@@ -220,7 +263,7 @@ export class MooTelnetSession {
           if (this.pending && this.pending.requestId === requestId) {
             this.pending = null;
           }
-          this.close();
+          this.close("marker_timeout", { timeoutMs });
           reject(new Error(`Timed out waiting for command completion marker: ${DONE_MARKER}`));
         }, timeoutMs);
 
@@ -238,6 +281,7 @@ export class MooTelnetSession {
         };
 
         const socket = this.socket;
+        this.lastSentAt = Date.now();
         socket.write(payload, (error) => {
           if (this.socket !== socket) return;
           if (!error) {
@@ -249,7 +293,7 @@ export class MooTelnetSession {
             this.pending = null;
           }
           clearTimeout(timer);
-          this.close();
+          this.close("write_error", { errorCode: socketErrorCode(error) });
           reject(error);
         });
       });
@@ -271,7 +315,7 @@ export class MooTelnetSession {
           if (this.pending && this.pending.requestId === requestId) {
             this.pending = null;
           }
-          this.close();
+          this.close("completion_timeout", { timeoutMs });
           reject(new Error("Timed out waiting for command completion."));
         }, timeoutMs);
 
@@ -290,6 +334,7 @@ export class MooTelnetSession {
         };
 
         const socket = this.socket;
+        this.lastSentAt = Date.now();
         socket.write(payload, (error) => {
           if (this.socket !== socket) return;
           if (!error) {
@@ -301,7 +346,7 @@ export class MooTelnetSession {
             this.pending = null;
           }
           clearTimeout(timer);
-          this.close();
+          this.close("write_error", { errorCode: socketErrorCode(error) });
           reject(error);
         });
       });
@@ -330,7 +375,7 @@ export class MooTelnetSession {
         const now = Date.now();
         if (!this.connected) throw new Error("MOO connection closed during capture; completion unknown.");
         if (now - start >= Math.max(this.captureTimeoutMs, firstResponseTimeoutMs + idleMs)) {
-          this.close();
+          this.close("capture_total_timeout", { timeoutMs: Math.max(this.captureTimeoutMs, firstResponseTimeoutMs + idleMs) });
           throw new Error("MOO total capture deadline exceeded; completion unknown. No retry performed.");
         }
         const currentLength = this.buffer.length;
@@ -344,7 +389,7 @@ export class MooTelnetSession {
         }
 
         if (!started && now - start >= firstResponseTimeoutMs) {
-          this.close();
+          this.close("first_response_timeout", { timeoutMs: firstResponseTimeoutMs });
           throw new Error("MOO first response deadline exceeded; completion unknown. No retry performed.");
         }
 
@@ -369,9 +414,13 @@ export class MooTelnetSession {
       });
       this.buffer = "";
       try {
-        if (captured.capture.stop_reason !== "idle" || !validateCapture(captured)) this.close();
+        if (captured.capture.stop_reason !== "idle") {
+          this.close(`search_${captured.capture.stop_reason}`, captured.capture);
+        } else if (!validateCapture(captured)) {
+          this.close("search_invalid_response", captured.capture);
+        }
       } catch (error) {
-        this.close();
+        this.close("search_validation_error");
         throw error;
       }
       return captured;
@@ -401,7 +450,7 @@ export class MooTelnetSession {
         const now = Date.now();
         if (!this.connected) throw new Error("MOO connection closed during capture; completion unknown.");
         if (now - start >= Math.max(this.captureTimeoutMs, firstResponseTimeoutMs + idleMs)) {
-          this.close();
+          this.close("capture_total_timeout", { timeoutMs: Math.max(this.captureTimeoutMs, firstResponseTimeoutMs + idleMs) });
           throw new Error("MOO total capture deadline exceeded; completion unknown. No retry performed.");
         }
         const currentLength = this.buffer.length;
@@ -419,7 +468,7 @@ export class MooTelnetSession {
         }
 
         if (!started && now - start >= firstResponseTimeoutMs) {
-          this.close();
+          this.close("first_response_timeout", { timeoutMs: firstResponseTimeoutMs });
           throw new Error("MOO first response deadline exceeded; completion unknown. No retry performed.");
         }
 
@@ -443,7 +492,8 @@ export class MooTelnetSession {
     let state = "queued", resolveResult, rejectResult;
     const result = new Promise((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
     const diagnostic = (event, stage) => this.logger.info("MOO command lifecycle", {
-      event, stage, requestId, queueWaitMs: Date.now() - enqueuedAt,
+      event, stage, requestId, connectionId: context.connectionId, toolName: context.toolName,
+      socketId: this.socketId, pid: process.pid, queueWaitMs: Date.now() - enqueuedAt,
       queueDepth: this.pendingQueueDepth
     });
     const cancelQueued = (error, event) => {
@@ -457,7 +507,7 @@ export class MooTelnetSession {
     };
     const abort = () => {
       if (state === "queued") cancelQueued(new Error("MOO command cancelled before execution."), "moo_command_cancelled");
-      else if (state === "running") this.close();
+      else if (state === "running") this.close("request_cancelled");
     };
     const timer = setTimeout(() => cancelQueued(
       new Error("MOO busy: command waited 30 seconds in queue and was not executed."),
@@ -477,20 +527,25 @@ export class MooTelnetSession {
       const startedAt = Date.now();
       context.queueWaitMs = (context.queueWaitMs ?? 0) + startedAt - enqueuedAt;
       this.activeWork = true;
+      this.activeContext = { ...context, requestId };
+      let status = "success";
       diagnostic("moo_command_dequeued", "execution");
       try {
         const value = await work();
         if (signal?.aborted) throw new Error("MOO command cancelled; completion unknown. No retry performed.");
         resolveResult(value);
       } catch (error) {
+        status = signal?.aborted ? "cancelled" : "error";
         rejectResult(error);
       } finally {
         state = "finished";
         this.activeWork = false;
+        this.activeContext = null;
         this.pendingQueueDepth -= 1;
         signal?.removeEventListener("abort", abort);
         this.logger.info("MOO command finished", { event: "moo_command_finished", stage: "execution",
-          requestId, queueWaitMs: startedAt - enqueuedAt, durationMs: Date.now() - startedAt });
+          requestId, connectionId: context.connectionId, toolName: context.toolName, status, socketId: this.socketId,
+          queueWaitMs: startedAt - enqueuedAt, durationMs: Date.now() - startedAt });
       }
     };
     this.commandQueue = this.commandQueue.then(wrappedWork, wrappedWork);
@@ -502,8 +557,9 @@ export class MooTelnetSession {
       throw new Error("MOO connection is not open.");
     }
     const socket = this.socket;
+    this.lastSentAt = Date.now();
     socket.write(`${line.trim()}\n`, error => {
-      if (error && this.socket === socket) this.close();
+      if (error && this.socket === socket) this.close("write_error", { errorCode: socketErrorCode(error) });
     });
   }
 
@@ -530,6 +586,7 @@ export class MooTelnetSession {
       }
     }
 
+    this.close("login_drain_timeout", { timeoutMs });
     throw new Error("MOO login drain deadline exceeded.");
   }
 
@@ -579,7 +636,12 @@ export class MooTelnetSession {
     reject(error);
   }
 
-  close() {
+  close(reason = "explicit_close", details = {}) {
+    if (this.socket) {
+      this.logger.warn("MOO connection closed", {
+        event: "moo_connection_closed", ...this.connectionDiagnostic(), ...details, reason
+      });
+    }
     this.stopKeepAlive();
     this.rejectPending(new Error("MOO connection closed."));
 

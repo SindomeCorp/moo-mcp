@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import { MooTelnetSession, commandContext } from '../src/moo-session.js';
+import { sanitizeLogInfo } from '../src/sanitized-log.js';
 const logger = { info(){}, warn(){}, error(){}, debug(){} };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const make = options => new MooTelnetSession({ host:'127.0.0.1', port:1, username:'fake', password:'fake', logger, ...options });
@@ -32,14 +33,14 @@ test('TCP connect deadline destroys hanging socket and cleans transient listener
   assert.equal(socket.destroyed,true); assert.equal(socket.listenerCount('connect'),0);
   assert.equal(s.connected,false);
 });
-async function fake(t, onLine){
+async function fake(t, onLine, options = {}){
   const sockets=new Set();
   const server=net.createServer(socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));
     let buffer=''; socket.on('data',data=>{buffer+=data; let i; while((i=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,i);buffer=buffer.slice(i+1);onLine(socket,line);}});
   });
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
   t.after(()=>{for(const socket of sockets)socket.destroy();server.close();});
-  const s=make({port:server.address().port});t.after(()=>s.close());return s;
+  const s=make({port:server.address().port, ...options});t.after(()=>s.close());return s;
 }
 test('markerless banner login and reconnect ignore stale old socket close',async t=>{
   const s=await fake(t,(socket,line)=>{if(line.startsWith('connect '))socket.write('Synthetic greeting\n');});
@@ -135,4 +136,116 @@ test('incomplete search validation retires socket before next queued work can st
   let nextConnected;
   const next=s.enqueue(()=>{nextConnected=s.connected;});
   await result;await next;assert.equal(nextConnected,false);
+});
+
+function diagnosticLogger(records) {
+  return Object.fromEntries(['info', 'warn', 'error', 'debug'].map(level =>
+    [level, (message, metadata) => records.push(sanitizeLogInfo({ level, message, ...metadata }))]));
+}
+
+test('timeout and remote EOF have distinct correlated diagnostics without response contents', async t => {
+  const records = [];
+  const s = await fake(t, (socket, line) => {
+    if (line.startsWith('connect ')) socket.write('Synthetic private greeting\n');
+    else if (line === 'remote-end') socket.end('private remote disconnect message\n');
+    else socket.write('private incomplete response\n');
+  }, { logger: diagnosticLogger(records) });
+  await s.connectAndLogin();
+  const firstSocketId = s.socketId;
+  await assert.rejects(commandContext.run({ requestId: 'timeout-request', connectionId: 'client-a', toolName: 'run_moo_command' },
+    () => s.runCommand('private command', 30)), /Timed out/);
+  const timeout = records.find(record => record.reason === 'marker_timeout');
+  assert.equal(timeout.socketId, firstSocketId, 'timeout identifies the retired socket');
+  assert.equal(timeout.requestId, 'timeout-request', 'timeout identifies the active request');
+  assert.equal(timeout.connectionId, 'client-a', 'timeout identifies the MCP session');
+  assert.equal(timeout.timeoutMs, 30, 'timeout records its deadline');
+  assert.ok(timeout.bufferedChars > 0, 'timeout records that incomplete output arrived');
+  assert.equal(records.find(record => record.event === 'moo_command_finished').status, 'error');
+
+  await s.ensureConnectedAndLoggedIn();
+  const secondSocketId = s.socketId;
+  assert.notEqual(secondSocketId, firstSocketId, 'reconnect gets a new socket identity');
+  await assert.rejects(commandContext.run({ requestId: 'remote-request', connectionId: 'client-b' },
+    () => s.runCommand('remote-end', 1000)), /closed/);
+  const remote = records.find(record => record.reason === 'remote_close');
+  assert.equal(remote.socketId, secondSocketId, 'remote close identifies the new socket');
+  assert.equal(remote.requestId, 'remote-request', 'remote event uses current work, not the connection creator');
+  assert.ok(records.some(record => record.event === 'moo_socket_end'), 'remote EOF is recorded separately');
+  assert.equal(records.filter(record => record.event === 'moo_connection_closed').length, 2, 'one closure record per retired socket');
+  assert.equal(JSON.stringify(records).includes('private'), false, 'diagnostics never include command or response text');
+});
+
+test('active cancellation logs its own reason and does not close a replacement socket', async t => {
+  const records = [];
+  const s = await fake(t, (socket, line) => {
+    if (line.startsWith('connect ')) socket.write('Synthetic greeting\n');
+  }, { logger: diagnosticLogger(records) });
+  await s.connectAndLogin();
+  const old = s.socket;
+  const controller = new AbortController();
+  const pending = commandContext.run({ requestId: 'cancel-request', signal: controller.signal }, () => s.runCommand('private command'));
+  await sleep(10);
+  controller.abort();
+  await assert.rejects(pending, /closed|cancelled/);
+  assert.equal(records.find(record => record.reason === 'request_cancelled').requestId, 'cancel-request');
+  assert.equal(records.find(record => record.event === 'moo_command_finished').status, 'cancelled');
+  await s.ensureConnectedAndLoggedIn();
+  old.emit('close');
+  assert.equal(s.connected, true, 'late close from retired socket cannot kill replacement');
+  assert.equal(records.filter(record => record.event === 'moo_connection_closed').length, 1);
+});
+
+test('socket error diagnostics retain known codes and drop arbitrary error content', async t => {
+  const records = [];
+  const s = await fake(t, socket => socket.write('Synthetic greeting\n'), { logger: diagnosticLogger(records) });
+  for (const [code, expected] of [['ECONNRESET', 'ECONNRESET'], ['private error code', 'unknown']]) {
+    await s.connectAndLogin();
+    s.socket.emit('error', Object.assign(new Error('private error message'), { code }));
+    assert.equal(records.filter(record => record.reason === 'socket_error').at(-1).errorCode, expected);
+    assert.equal(s.connected, false);
+  }
+  assert.equal(JSON.stringify(records).includes('private'), false);
+});
+
+test('concurrent MCP contexts share one login and serialize commands on one socket', async t => {
+  let logins = 0, inFlight = 0, maxInFlight = 0;
+  const commands = [];
+  const s = await fake(t, (socket, line) => {
+    if (line.startsWith('connect ')) {
+      logins++;
+      socket.write('Synthetic greeting\n');
+    } else {
+      commands.push(line);
+      maxInFlight = Math.max(maxInFlight, ++inFlight);
+      setTimeout(() => {
+        inFlight--;
+        socket.write(`${line} ### Done ###\n`);
+      }, 10);
+    }
+  });
+  const results = await Promise.all(['a', 'b', 'c'].map(connectionId => commandContext.run({ connectionId }, async () => {
+    await s.ensureConnectedAndLoggedIn();
+    return s.runCommand(connectionId, 1000);
+  })));
+  assert.deepEqual(results, ['a', 'b', 'c'], 'each client receives its own result');
+  assert.equal(logins, 1, 'concurrent reconnect preflights open exactly one MOO login');
+  assert.equal(maxInFlight, 1, 'MOO commands never overlap');
+  assert.deepEqual(commands, ['a', 'b', 'c'], 'each command executes exactly once');
+});
+
+test('idle remote disconnect is not attributed to the request that opened the socket', async t => {
+  const records = [];
+  let remote;
+  const s = await fake(t, socket => {
+    remote = socket;
+    socket.write('Synthetic greeting\n');
+  }, { logger: diagnosticLogger(records) });
+  await commandContext.run({ requestId: 'old-request', connectionId: 'old-client' }, () => s.ensureConnectedAndLoggedIn());
+  const closed = new Promise(resolve => s.socket.once('close', resolve));
+  remote.end();
+  await closed;
+  const diagnostic = records.find(record => record.reason === 'remote_close');
+  assert.equal(diagnostic.activeWork, false, 'connection was idle');
+  assert.equal(diagnostic.requestId, undefined, 'old opener is not reported as active work');
+  assert.equal(diagnostic.connectionId, undefined, 'old client is not blamed for idle EOF');
 });

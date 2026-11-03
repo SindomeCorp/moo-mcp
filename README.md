@@ -297,6 +297,29 @@ Bounds and behavior:
 - Lifecycle logs include generated request IDs, stage, queue wait, duration and status.
   A central allowlist removes command arguments, response contents, login/user data and
   exception messages from console and file logs. Tool responses retain their existing data.
+- `run_moo_eval` recognizes a standalone final `(End of traceback)` line as a
+  completed runtime error. Live capture waits for the line ending (LF or CRLF),
+  including when the terminator arrives across multiple TCP chunks. The tool
+  returns MCP `isError: true`, with the complete captured traceback in `reason`
+  and `raw_output`, rather than waiting for the completion timeout. This completed
+  error keeps the shared MOO connection available for the next queued command.
+  Traceback contents are returned to the caller, not written to lifecycle logs;
+  the log records `tool_eval_runtime_error` with request correlation.
+- Every socket retirement logs `moo_connection_closed` with a `reason`, generated
+  `socketId`, process `pid`, socket age, send/receive idle times, byte counts,
+  buffered character count and queue state. Active work also includes its MCP
+  `connectionId`, `requestId` and validated `toolName`. Idle socket callbacks do not
+  inherit attribution from the request that originally opened the connection.
+  Reasons distinguish `first_response_timeout`, `capture_total_timeout`,
+  `marker_timeout`, `completion_timeout`, `request_cancelled`, `write_error`,
+  `socket_error`, search capture/validation failures, login failures and shutdown.
+  `moo_socket_end` records remote EOF before `remote_close`; `socket_error` retains
+  an allowlisted OS error code. Remote EOF/close alone does not identify why the peer
+  disconnected. `moo_command_finished` now distinguishes `success`, `error` and
+  `cancelled` (execution outcome, not validation of returned tool data).
+  Keep-alive writes are visible at info level; successful writes do not prove a
+  server response. Filter by `socketId` to follow a connection and by `requestId`
+  to follow the queue and tool call. Commands and response contents remain private.
 
 Validation is entirely offline against fake TCP/MOO servers and ephemeral localhost MCP
 listeners. No production `.env` is needed. From this worktree, use the installed Node 22:

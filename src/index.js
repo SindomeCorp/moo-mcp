@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { sanitizeLogInfo } from "./sanitized-log.js";
+import { endsWithTraceback } from "./eval-response.js";
 import { buildSearchCommand } from "./search-command.js";
 import { searchResponseResult } from "./search-response.js";
 import { MooTelnetSession, commandContext } from "./moo-session.js";
@@ -260,6 +261,14 @@ function parseVerbListing(rawOutput, objectRef, verbName) {
 
 function parseEvalOutput(rawOutput, evalCommand) {
   const normalized = rawOutput.replace(/\r\n/g, "\n").trim();
+  if (endsWithTraceback(rawOutput)) {
+    return {
+      error: true,
+      reason: normalized,
+      eval: evalCommand,
+      raw_output: rawOutput
+    };
+  }
   const compilerErrorMatch = normalized.match(/[\s\S]*\n\d+\s+error(?:s)?\.\s*$/i);
   if (compilerErrorMatch) {
     return {
@@ -1334,6 +1343,12 @@ const callToolHandler = async (request, extra) => {
     throw new Error(`Unknown tool: ${request.params.name}`);
   }
 
+  // Only record validated tool names; arguments and command contents stay private.
+  const context = commandContext.getStore();
+  if (context) {
+    context.connectionId = connectionId;
+    context.toolName = request.params.name;
+  }
   const requestId = commandContext.getStore()?.requestId ?? randomUUID();
 
   if (request.params.name === "get_moo_verb_source") {
@@ -4083,6 +4098,7 @@ const callToolHandler = async (request, extra) => {
     const output = await mooSession.runCommandUntil(
       evalCommand,
       (buffer) => {
+        if (endsWithTraceback(buffer, true)) return { done: true };
         const normalized = buffer.replace(/\r\n/g, "\n");
         const match = /(^|\r?\n)(\s*=>[^\r\n]*)(\r?\n|$)/m.exec(buffer);
         if (!match) {
@@ -4108,8 +4124,9 @@ const callToolHandler = async (request, extra) => {
     const parsed = parseEvalOutput(output, evalCommand);
 
     if (parsed.error) {
-      logger.error("Failed to parse eval output", {
-        event: "tool_eval_parse_error",
+      const runtimeTraceback = endsWithTraceback(output);
+      logger.error(runtimeTraceback ? "MOO eval returned a traceback" : "Failed to parse eval output", {
+        event: runtimeTraceback ? "tool_eval_runtime_error" : "tool_eval_parse_error",
         requestId,
         eval: evalCommand
       });
@@ -4186,6 +4203,7 @@ if (config.mcpMode === "stdio") {
   await server.connect(transport);
   logger.info("MCP server started in stdio mode", {
     event: "mcp_server_started",
+    pid: process.pid,
     mode: "stdio"
   });
 } else {
@@ -4322,6 +4340,7 @@ if (config.mcpMode === "stdio") {
 
       logger.info("MCP server started in http_shared mode", {
         event: "mcp_server_started",
+        pid: process.pid,
         mode: "http_shared",
         host: config.mcpHttpHost,
         port: config.mcpHttpPort,
@@ -4389,7 +4408,7 @@ const shutdown = async (signal = "unknown") => {
         "http_server_close"
       );
     }
-    mooSession.close();
+    mooSession.close("server_shutdown");
     process.exit(0);
   })().catch((error) => {
     logger.error("Shutdown failed", {

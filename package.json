@@ -6,7 +6,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "check": "node --check src/index.js && node --check src/search-command.js && node --check src/search-response.js && node --check src/moo-session.js && node --check src/sanitized-log.js",
+    "check": "node --check src/index.js && node --check src/eval-response.js && node --check src/search-command.js && node --check src/search-response.js && node --check src/moo-session.js && node --check src/sanitized-log.js",
     "test": "node --test"
   },
   "dependencies": {
