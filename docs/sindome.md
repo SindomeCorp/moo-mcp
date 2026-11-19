@@ -1,6 +1,6 @@
 # Sindome extension and operational notes
 
-These tools require Sindome-specific server verbs and response formats. Enable them with `moo-tools-config=config/sindome.tools.json`. This restores all 24 original tool names, including the two core tools. The configuration does not install server-side verbs.
+These tools require Sindome-specific server verbs and response formats. Enable them with `moo-tools-config=config/sindome.tools.json`. This profile provides nine Sindome bug and traceback tools plus the two core tools. Use the combined profile for object inspection, verb source, and search after attaching the portable `@mcp` feature to the account. Profiles do not install server-side verbs.
 
 The programming and VMS preservation rules below apply to this extension. Core raw command/eval tools use generic descriptions; callers using those tools for Sindome edits must still follow these rules.
 
@@ -56,7 +56,6 @@ Optional execution tuning:
 
 - `moo-idle-ms` (default `1000`)
 - `moo-first-response-timeout-ms` (default `2000`)
-- `moo-code-search-timeout-ms` (default `15000`)
 
 In `http_shared` mode, host is restricted to localhost (`127.0.0.1`, `localhost`, or `::1`) so it only accepts connections from the same computer.
 
@@ -154,10 +153,10 @@ documentation/readability-only edits:
 
 1. Capture the full original source before editing, including every bottom
    `VMS NOTE` string, `VMS VERSION`, and `Last modified` annotation. Prefer
-   `verb-data` and verify the capture is complete. `get_moo_verb_source` separates
-   `source_code` from `vms_notes`; do not treat `source_code` alone as the complete
-   source or upload the rendered `VMS NOTES` heading as MOO code. If annotations
-   are missing or conflicting, stop and reconcile before programming.
+   `verb-data` from the combined profile and verify `source.code_lines` includes
+   the stored annotations. An annotated listing may present a `VMS NOTES` heading
+   outside the program. If annotations are missing or conflicting, stop and
+   reconcile before programming.
 2. Edit only the intended body. Retain all existing bottom annotations verbatim
    as input to every full-source upload. Never assume save reconstructs omitted
    history: `$vms2:comment_code` uses the submitted version/history, and a missing
@@ -176,75 +175,6 @@ documentation/readability-only edits:
 
 These instructions govern caller behavior; the connector does not enforce footer
 preservation. See `docs/MOO_CODE_GOTCHAS.md`, sections 7 and 10, in `moo-codex`.
-
-## Structured search strings
-
-`search-json` accepts ordinary string values, including multiword names. For example:
-
-```json
-{"type":"things","name":"TERRA armband","generics_only":true,"limit":3,"extra_filters":["backend=cache"]}
-```
-
-The connector quotes and escapes typed filter values for the MOO command parser.
-Supply the intended text directly; embedded quote characters are treated as literal
-search characters, not caller-provided command syntax. Control characters and line
-separators are rejected. `extra_filters` retains its raw command-token contract
-(including caller-provided quoting), but also rejects control characters and line
-separators. Raw `run_moo_command` syntax remains the caller's responsibility.
-
-Run local regression checks with `npm test` and `npm run check`.
-
-## Search response diagnostics
-
-The `search-json` handler distinguishes transport capture problems from MOO results:
-
-| Outcome | MCP result |
-| --- | --- |
-| No bytes before the first-response deadline | `isError=true`, `error=moo_response_timeout` |
-| Output continues until the total deadline | `isError=true`, `error=moo_response_timeout`; partial preview retained |
-| Connection closes during capture | `isError=true`, `error=moo_connection_closed` |
-| Idle capture contains only whitespace | `isError=true`, `error=moo_empty_response` |
-| Idle capture has an unclosed JSON object/string | `isError=true`, `error=moo_incomplete_response` |
-| Other output cannot be parsed as a JSON object | `isError=true`, `error=moo_invalid_json` |
-| Valid MOO error JSON (`ok=0` or truthy `error`) | Original MOO payload preserved, `isError=true` |
-| Valid successful JSON, including an empty results list | Original MOO payload preserved, `isError=false` |
-
-Existing first-response and idle settings retain their defaults and behavior.
-Search capture now also has a total deadline: `moo-search-timeout-ms` (alias
-`MOO_SEARCH_TIMEOUT_MS`), default 15000, integer range 1..120000 milliseconds.
-This bounds continuous output; it does not add a delay to normal calls. The earliest
-applicable deadline wins. Legacy captures and queue waits are now bounded as described
-in the transport-hardening rollout section below.
-
-Capture diagnostics report stop reason, elapsed capture time (excluding queue wait),
-first-byte observation time, all three wait settings, and received character count.
-The existing `timed_out_waiting_for_first_line` name is retained in this metadata,
-but receipt detection is based on bytes/text arriving, not a newline. Timing uses a
-poll interval of at most 50 ms. Parsed results carry this metadata in MCP
-`_meta.moo_capture`; transport/parse errors carry it in their JSON `capture` field.
-
-Error previews preserve at most 1000 characters after redacting the configured MOO
-password and stripping terminal controls. `preview_truncated` explicitly reports
-preview truncation; it does not claim that the server truncated its response.
-New capture log records contain timing/count metadata, not response contents.
-
-Idle is not a completion marker. Unclosed JSON is evidence of potentially incomplete
-output, not proof that more will arrive. Timeout never means an empty search result
-or a canceled MOO task. No automatic command retry is performed. Uncertain streams
-are now retired; the next explicit request may reconnect as described below.
-The existing protocol has no request identifier on MOO response lines; late output
-can still complicate attribution to a subsequent command. This change reports capture
-uncertainty and does not solve server-task cancellation or response framing.
-
-Historical validation of the earlier search-only change used simulated timing.
-Its read-only live baseline returned a matching test object,
-an empty result for `zzzzNoSuchTerraItem94721`, and `invalid_property_filter` for
-`prop=description`, all with cached searches limited to 3. The running process was
-not restarted to test the new capture implementation.
-
-Activation requires separate approval as described in the transport-hardening rollout
-section below. Do not induce slow searches or mutation
-retries to test timeouts on the shared server.
 
 ## Troubleshooting
 
@@ -332,7 +262,7 @@ PATH=/path/to/node/bin:$PATH npm run check
 ```
 
 After separately approved rollout, initialize a fresh MCP session, list tools and run
-one harmless `search-json` help call. Do not deliberately stall or mutate the live MOO
+one read-only `bugs-json` call. Do not deliberately stall or mutate the live MOO
 to test failure handling. Preserve the previous commit/config for operator rollback.
 Backend restart invalidates previous MCP HTTP session IDs; clients must initialize again.
 

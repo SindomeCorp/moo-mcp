@@ -47,15 +47,14 @@ test('core catalog is generic; unavailable tools cannot be called', async () => 
   assert.equal(ctx.commands.length, 0);
 });
 
-test('Sindome example restores all original tools and preserves dispatch', async () => {
-  const ctx = context('{"ok":1,"verbs":[]}');
+test('the Sindome example loads only bug and traceback tools plus core', async () => {
+  const ctx = context('{"ok":1,"bugs":[]}');
   const registry = await loadToolRegistry({ configPath: fileURLToPath(new URL('../config/sindome.tools.json.example', import.meta.url)), context: ctx });
-  assert.equal(registry.tools.length, 24);
-  assert.equal(new Set(registry.tools.map(tool => tool.name)).size, 24);
-  assert.ok(registry.tools.some(tool => tool.name === 'submit_bug'));
-  const result = await call(registry, 'verbs-json', { arg: '#123' });
+  assert.equal(registry.tools.length, 11);
+  const result = await call(registry, 'bugs-json', { arg: 'open' });
   assert.equal(result.isError, false);
-  assert.deepEqual(ctx.commands, ['@verbs-json #123']);
+  assert.deepEqual(ctx.commands, ['@bugs-json open']);
+  await assert.rejects(call(registry, 'verbs-json', { object: '#123' }), /Unknown tool/);
   assert.equal((await call(registry, 'resolve-traceback', { id: '123' })).isError, true);
   assert.equal(ctx.commands.length, 1);
 });
@@ -130,7 +129,7 @@ test('local module paths resolve relative to configuration and module tools shar
 
 const profile = name => fileURLToPath(new URL(`../config/${name}.tools.json`, import.meta.url));
 
-test('shipped profiles can be loaded separately or combined on one session', async () => {
+test('independent profiles compose with the same tool names in either order', async t => {
   const ctx = context('{"ok":1,"verbs":[]}');
   ctx.mooSession.runCommandUntil = async (command, consume, timeout) => {
     ctx.commands.push(command);
@@ -149,23 +148,32 @@ test('shipped profiles can be loaded separately or combined on one session', asy
   await assert.rejects(call(lab, 'submit_bug'), /Unknown tool/);
 
   const sindome = await loadToolRegistry({ configPath: profile('sindome'), context: ctx });
-  assert.equal(sindome.tools.length, 24);
+  assert.equal(sindome.tools.length, 11);
   await assert.rejects(call(sindome, 'hello'), /Unknown tool/);
+  await assert.rejects(call(sindome, 'verbs-json'), /Unknown tool/);
 
-  const combined = await loadToolRegistry({ configPath: profile('combined'), context: ctx });
-  assert.equal(combined.tools.length, 38);
-  assert.equal(new Set(combined.tools.map(tool => tool.name)).size, 38);
-  assert.equal((await call(combined, 'verbs-json', { arg: '#1' })).isError, false);
-  assert.equal(ctx.commands.at(-1), '@verbs-json #1');
-  assert.deepEqual(payload(await call(combined, 'lab-verbs-json', { object: '#1' })).params, { object: '#1' });
-  await call(combined, 'lab-search-json', { name: 'café' });
-  assert.match(ctx.commands.at(-1), /caf\\u00e9/);
-  assert.equal((await call(combined, 'lab-verbs-json', { arg: '#1' })).isError, true);
+  const core = await loadToolRegistry({ context: ctx });
+  const names = registry => registry.tools.map(tool => tool.name).sort();
+  assert.deepEqual(names(lab).filter(name => names(sindome).includes(name)), names(core));
+  const expected = [...new Set([...names(lab), ...names(sindome)])].sort();
+  assert.equal(expected.length, 25);
+
+  const reverse = await configFile(t, { version: 1, includes: [profile('toaststunt-llm-lab'), profile('sindome')] });
+  for (const configPath of [profile('combined'), reverse]) {
+    const combined = await loadToolRegistry({ configPath, context: ctx });
+    assert.deepEqual(names(combined), expected);
+    assert.equal((await call(combined, 'bugs-json', { arg: 'open' })).isError, false);
+    assert.equal(ctx.commands.at(-1), '@bugs-json open');
+    assert.deepEqual(payload(await call(combined, 'verbs-json', { object: '#1' })).params, { object: '#1' });
+    await call(combined, 'search-json', { name: 'café' });
+    assert.match(ctx.commands.at(-1), /caf\\u00e9/);
+    assert.equal((await call(combined, 'verbs-json', { arg: '#1' })).isError, true);
+  }
 });
 
-test('includes reject cycles and collisions without a namespace', async t => {
+test('includes reject cycles and duplicate registrations', async t => {
   const cycle = await configFile(t, { version: 1, includes: ['tools.json'] });
   await assert.rejects(loadToolRegistry({ configPath: cycle, context: context() }), /Circular tools configuration/);
-  const collision = await configFile(t, { version: 1, includes: [profile('sindome'), profile('toaststunt-llm-lab')] });
+  const collision = await configFile(t, { version: 1, includes: [profile('sindome'), profile('sindome')] });
   await assert.rejects(loadToolRegistry({ configPath: collision, context: context() }), /Duplicate tool name/);
 });

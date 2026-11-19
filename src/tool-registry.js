@@ -76,21 +76,16 @@ export async function loadToolRegistry({ configPath, context }) {
     const validate = validator.getValidator(tool.inputSchema);
     registrations.set(tool.name, { tool, call, validate });
   };
-  const addModule = (module, prefix = "") => {
+  const addModule = module => {
     if (!module || !Array.isArray(module.tools) || typeof module.callTool !== "function") {
       fail("Tool module must return tools and callTool");
     }
     for (const tool of module.tools) {
-      if (!prefix) {
-        add(tool, (request, extra) => module.callTool(request, extra));
-      } else {
-        add({ ...tool, name: prefix + tool.name }, (request, extra) =>
-          module.callTool({ ...request, params: { ...request.params, name: tool.name } }, extra));
-      }
+      add(tool, (request, extra) => module.callTool(request, extra));
     }
   };
 
-  async function loadConfig(configFile, prefix = "", ancestors = []) {
+  async function loadConfig(configFile, ancestors = []) {
     const absolutePath = path.resolve(configFile);
     const canonicalPath = await realpath(absolutePath);
     if (ancestors.includes(canonicalPath)) fail(`Circular tools configuration: ${absolutePath}`);
@@ -102,23 +97,20 @@ export async function loadToolRegistry({ configPath, context }) {
       fail(`Invalid tools configuration (expected version 1): ${absolutePath}`);
     }
     for (const include of config.includes ?? []) {
-      const entry = typeof include === "string" ? { path: include } : include;
-      if (!entry || typeof entry.path !== "string" || !entry.path.trim() ||
-        Object.keys(entry).some(key => !["path", "prefix"].includes(key)) ||
-        (entry.prefix !== undefined && (typeof entry.prefix !== "string" || !/^[A-Za-z0-9_.-]+$/.test(entry.prefix)))) {
+      if (typeof include !== "string" || !include.trim()) {
         fail(`Invalid tools configuration include: ${absolutePath}`);
       }
-      await loadConfig(relativePath(entry.path), prefix + (entry.prefix ?? ""), [...ancestors, canonicalPath]);
+      await loadConfig(relativePath(include), [...ancestors, canonicalPath]);
     }
     for (const modulePath of config.modules ?? []) {
       if (typeof modulePath !== "string" || !modulePath.trim()) fail("Module paths must be non-empty local paths");
       const module = await import(pathToFileURL(relativePath(modulePath)).href);
       if (typeof module.createTools !== "function") fail("Tool module must export createTools(context)");
-      addModule(await module.createTools(context), prefix);
+      addModule(await module.createTools(context));
     }
     for (const definition of config.tools ?? []) {
       const { tool, call } = configuredTool(definition, context);
-      add(prefix ? { ...tool, name: prefix + tool.name } : tool, call);
+      add(tool, call);
     }
   }
 

@@ -85,28 +85,40 @@ The example `search_catalog` assumes your MOO has `$catalog:search`; adapt it to
 
 ### Select a shipped profile
 
-Set one of these paths in `moo-tools-config` or `MOO_TOOLS_CONFIG`:
+The two core tools are always available. Choose an optional profile for the MOO you are connecting to.
 
 | Profile | Configuration | Tools |
 | --- | --- | --- |
-| ToastStunt LLM Lab | `config/toaststunt-llm-lab.tools.json` | Portable object, verb, and property tools over the installed `@mcp` feature |
-| Sindome | `config/sindome.tools.json` | The original 24-tool catalog, including source/VMS handling, structured search, bugs, and tracebacks |
-| Combined | `config/combined.tools.json` | Both sets plus the two core tools. Lab tools have a `lab-` prefix, such as `lab-verbs-json` |
+| ToastStunt LLM Lab | `config/toaststunt-llm-lab.tools.json` | 14 tools for verb source, object and property inspection, and structured search over the installed `@mcp` feature |
+| Sindome | `config/sindome.tools.json` | 9 tools for bug triage, bug reports and comments, and traceback review |
+| Combined | `config/combined.tools.json` | Both sets plus the two core tools. Tool names stay the same |
 
-Profiles share one MOO connection. Use the combined profile when the same MOO and account support both sets of commands. To connect to two worlds, launch two instances of `src/index.js` with different credentials and configuration paths.
+Set the path in `.env` and start or restart the MCP server.
 
-The [ToastStunt lab setup](docs/toaststunt-llm-lab.md) explains the server-side feature. The [Sindome notes](docs/sindome.md) cover its account and verb requirements. Existing Sindome installations can point directly at the shipped profile and restart when ready. Paths copied from the older example still work.
+```ini
+moo-tools-config=config/toaststunt-llm-lab.tools.json
+```
+
+Alternatively, launch the server from the repository root with an environment variable. Leave `moo-tools-config` unset in `.env` when selecting the profile this way.
+
+```sh
+MOO_TOOLS_CONFIG=config/combined.tools.json npm start
+```
+
+Use the combined profile when the same MOO and account support both sets of commands. To connect to two worlds, launch two instances of `src/index.js` with separate credentials and profiles.
+
+The portable tools require the server-side `@mcp` feature. Run the [MOO installation transcript](https://github.com/SindomeCorp/toaststunt-llm-lab/blob/main/moo/install.moo) from [ToastStunt LLM Lab](https://github.com/SindomeCorp/toaststunt-llm-lab), or use its setup script to install the feature automatically on stock ToastCore. See the [lab profile notes](docs/toaststunt-llm-lab.md) for setup and call examples and the [Sindome notes](docs/sindome.md) for account and verb requirements.
 
 ### Combine configurations
 
-Use `includes` to load other version 1 configurations. Paths are relative to the file that lists them. A string entry keeps the included tool names. An object with `path` and `prefix` prepends the prefix to every tool in that file, including nested includes. The two core tools are registered once. Unresolved name collisions and circular includes fail at startup.
+Use `includes` to load other version 1 configurations. Paths are relative to the file that lists them. Each entry is a path string, and includes can be nested. The two core tools are registered once. Duplicate tool names and circular includes fail at startup.
 
 ```json
 {
   "version": 1,
   "includes": [
     "sindome.tools.json",
-    {"path": "toaststunt-llm-lab.tools.json", "prefix": "lab-"}
+    "toaststunt-llm-lab.tools.json"
   ]
 }
 ```
@@ -135,7 +147,7 @@ Core names cannot be replaced, and duplicate names across modules/configuration 
 
 The connector assumes a `connect USER PASSWORD` login command. It rejects known login errors and otherwise assumes readiness after bounded idle capture; the first tool call confirms usability. Different login protocols require a transport adaptation.
 
-Optional timeout settings include `moo-idle-ms` (1000), `moo-first-response-timeout-ms` (2000), `moo-search-timeout-ms` (15000, for JSON capture), and `moo-code-search-timeout-ms` (15000, Sindome code search). TCP connection and login capture each have a 10-second bound; queue wait is bounded to 30 seconds. Raw idle captures have a 30-second total ceiling, extended if the configured first-response plus idle waits require it.
+Optional timeout settings include `moo-idle-ms` (1000), `moo-first-response-timeout-ms` (2000), `moo-search-timeout-ms` (15000, for structured responses). TCP connection and login capture each have a 10-second bound; queue wait is bounded to 30 seconds. Raw idle captures have a 30-second total ceiling, extended if the configured first-response plus idle waits require it.
 
 Timeouts, disconnects, cancellation, and uncertain JSON captures retire the connection. Commands are never automatically replayed; the next explicit call may reconnect. Lifecycle logs go to stderr and `logs/mcp.log`, with command contents and responses removed. Treat historical logs as private. Restarting a shared HTTP daemon invalidates client sessions.
 

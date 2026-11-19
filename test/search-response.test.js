@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { captureSearchResponse, searchResponseResult } from "../src/search-response.js";
-import { buildSearchCommand } from "../src/search-command.js";
 
 const empty = '{"ok":1,"results":[],"meta":{"returned":0}}';
 const parse = text => { try { const p=JSON.parse(text); return p && typeof p === "object" && !Array.isArray(p) ? p : null; } catch { return null; } };
@@ -102,9 +101,7 @@ test("bounded preview flags truncation, retains wait metadata and redacts before
   assert.equal(p.capture.total_timeout_ms,15000);assert.equal(p.capture.received_chars,c.output.length);
 });
 
-test("fragmented successful response and existing serializer remain compatible",async()=>{
-  assert.equal(buildSearchCommand({type:"things",name:"TERRA armband",limit:3,extra_filters:["backend=cache"]}),
-    '@search-json things n="TERRA armband" limit=3 backend=cache');
+test("fragmented successful JSON response is parsed",async()=>{
   const c=await simulate([{at:50,text:empty.slice(0,10)},{at:100,text:empty.slice(10)}]);
   assert.deepEqual(payload(searchResponseResult(c,parse)),JSON.parse(empty));
 });

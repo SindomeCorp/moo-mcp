@@ -19,7 +19,6 @@ dotenv.config();
 
 const DEFAULT_IDLE_CAPTURE_MS = 1000;
 const DEFAULT_FIRST_RESPONSE_TIMEOUT_MS = 2000;
-const DEFAULT_CODE_SEARCH_TIMEOUT_MS = 15000;
 const SHUTDOWN_GRACE_MS = 2000;
 const DEFAULT_MCP_MODE = "stdio";
 const DEFAULT_HTTP_HOST = "127.0.0.1";
@@ -50,10 +49,6 @@ const config = {
     ]) ?? DEFAULT_FIRST_RESPONSE_TIMEOUT_MS
   ),
   searchTimeoutMs: Number(readEnv(["moo-search-timeout-ms", "MOO_SEARCH_TIMEOUT_MS"]) ?? 15000),
-  codeSearchTimeoutMs: Number(
-    readEnv(["moo-code-search-timeout-ms", "MOO_CODE_SEARCH_TIMEOUT_MS"]) ??
-      DEFAULT_CODE_SEARCH_TIMEOUT_MS
-  ),
   mcpMode: String(readEnv(["mcp-mode", "MCP_MODE"]) ?? DEFAULT_MCP_MODE).trim(),
   mcpHttpHost: String(
     readEnv(["mcp-http-host", "MCP_HTTP_HOST"]) ?? DEFAULT_HTTP_HOST
@@ -96,12 +91,6 @@ if (
 
 if (!Number.isInteger(config.searchTimeoutMs) || config.searchTimeoutMs < 1 || config.searchTimeoutMs > 120000) {
   throw new Error("Invalid search timeout. Set moo-search-timeout-ms (or MOO_SEARCH_TIMEOUT_MS) to 1..120000 milliseconds.");
-}
-
-if (!Number.isFinite(config.codeSearchTimeoutMs) || config.codeSearchTimeoutMs <= 0) {
-  throw new Error(
-    "Invalid code-search timeout. Set moo-code-search-timeout-ms (or MOO_CODE_SEARCH_TIMEOUT_MS) to a positive number."
-  );
 }
 
 if (config.mcpMode !== "stdio" && config.mcpMode !== "http_shared") {
