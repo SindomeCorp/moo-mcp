@@ -117,7 +117,11 @@ export class MooTelnetSession {
       this.buffer = "";
       this.sendLine(`connect ${this.username} ${this.password}`);
       const loginOutput = await this.readUntilIdle(LOGIN_TIMEOUT_MS, LOGIN_IDLE_MS);
-      if (/incorrect|different password|no such player|invalid|denied|failed/i.test(loginOutput)) {
+      // ToastCore reports connection callback errors after authentication.
+      const rejected = loginOutput.split(/\r?\n/).some(line =>
+        !/^Confunc failed: Permission denied\.$/i.test(line.trim()) &&
+        /incorrect|different password|no such player|invalid|denied|failed/i.test(line));
+      if (rejected) {
         this.close("login_rejected");
         throw new Error("MOO login rejected.");
       }

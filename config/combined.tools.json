@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "includes": [
+    "sindome.tools.json",
+    { "path": "toaststunt-llm-lab.tools.json", "prefix": "lab-" }
+  ]
+}

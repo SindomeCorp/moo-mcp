@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "look_at",
+      "description": "Look at an object on your MOO.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "object": { "type": "string", "pattern": "^#[0-9]+$" }
+        },
+        "required": ["object"],
+        "additionalProperties": false
+      },
+      "command": ["look ", { "argument": "object", "encoding": "raw" }],
+      "response": "text"
+    },
+    {
+      "name": "search_catalog",
+      "description": "Search a custom catalog verb installed on your MOO.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "query": { "type": "string", "minLength": 1 } },
+        "required": ["query"],
+        "additionalProperties": false
+      },
+      "command": ["; $catalog:search(", { "argument": "query", "encoding": "moo-string" }, ")"],
+      "response": "text"
+    }
+  ]
+}

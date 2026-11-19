@@ -1,0 +1,4 @@
+{
+  "version": 1,
+  "modules": ["../extensions/toaststunt-llm-lab.js"]
+}

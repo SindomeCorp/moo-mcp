@@ -249,3 +249,13 @@ test('idle remote disconnect is not attributed to the request that opened the so
   assert.equal(diagnostic.requestId, undefined, 'old opener is not reported as active work');
   assert.equal(diagnostic.connectionId, undefined, 'old client is not blamed for idle EOF');
 });
+
+test('ToastCore post-login callback permission warning does not reject authentication', async t => {
+  const warning = 'Confunc failed: Permission denied.\r\n';
+  const s = await fake(t, socket => socket.write(warning + 'Last connected recently.\r\n'));
+  await s.connectAndLogin();
+  assert.equal(s.loggedIn, true);
+
+  const rejected = await fake(t, socket => socket.write(warning + 'Either that player does not exist, or has a different password.\r\n'));
+  await assert.rejects(rejected.connectAndLogin(), /login rejected/);
+});
