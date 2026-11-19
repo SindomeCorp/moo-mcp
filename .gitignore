@@ -64,3 +64,7 @@ Thumbs.db
 /BROOKS-REVIEW.md
 
 .env
+
+# Local review and agent artifacts
+/.brooks-lint-history.json
+/.codex
