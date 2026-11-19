@@ -11,7 +11,7 @@ The default tools are `run_moo_command` and `run_moo_eval`. Optional configurati
 Use Node.js 22 or later.
 
 ```sh
-git clone https://github.com/sevenecks/moo-mcp.git
+git clone https://github.com/SindomeCorp/moo-mcp.git
 cd moo-mcp
 npm ci
 cp .env.example .env
