@@ -4,24 +4,60 @@ An extensible MCP server connecting AI tools to a MOO over telnet. It supports a
 
 The default tools are `run_moo_command` and `run_moo_eval`. Optional configuration adds your own tools or loads a shipped tool profile.
 
-## Setup
+## Quick start
 
-Use Node.js 22 or later. Install dependencies and create your private settings:
+### 1. Install and configure your MOO connection
+
+Use Node.js 22 or later.
 
 ```sh
+git clone https://github.com/sevenecks/moo-mcp.git
+cd moo-mcp
 npm ci
 cp .env.example .env
 ```
 
-Set `moo-hostname`, `moo-port`, `moo-user`, and `moo-password` in `.env`. Use a development MOO and an account with the permissions your tools require. The connection uses plain TCP telnet; use a trusted network or a secure tunnel. Never commit credentials or logs.
+Set `moo-hostname`, `moo-port`, `moo-user`, and `moo-password` in `.env`. Use a development MOO and an account with the permissions your tools require. The connection uses plain TCP telnet, so use a trusted network or a secure tunnel. Keep credentials in `.env`.
 
-```sh
-npm start
+### 2. Choose your tools
+
+Set `moo-tools-config` in `.env` to one of the paths below. Start with **Basic** to send commands to an existing MOO. Choose **ToastStunt LLM Lab** for structured tools to browse and develop a ToastStunt MOO.
+
+| Profile | `moo-tools-config` value | What you can do |
+| --- | --- | --- |
+| **Basic** | Leave unset | Send MOO commands with `run_moo_command` and parse eval results with `run_moo_eval`. |
+| **ToastStunt LLM Lab** | `config/toaststunt-llm-lab.tools.json` | Read verb source, inspect objects and properties, and search the MOO. Requires the lab's `@mcp` feature. |
+| **Sindome** (optional) | `config/sindome.tools.json` | Review bugs and tracebacks, file bug reports, and post bug comments on a Sindome MOO. |
+| **Combined** | `config/combined.tools.json` | Use the lab and Sindome tools on one MOO and account that support both sets. |
+
+For example, to enable the lab tools, set `moo-tools-config=config/toaststunt-llm-lab.tools.json`. The basic tools are available with every profile. Try `run_moo_command` with `{"command":"look"}`. If the account can eval, try `run_moo_eval` with `{"eval":";2 + 2"}`.
+
+For the lab profile, attach the server-side feature to the programmer account using the [MOO installation transcript](https://github.com/SindomeCorp/toaststunt-llm-lab/blob/main/moo/install.moo). The [ToastStunt LLM Lab setup](https://github.com/SindomeCorp/toaststunt-llm-lab) installs that feature automatically when provisioning stock ToastCore. Once connected, call `hello` to verify it, or try `verb-data` to read a verb. See the [lab tool examples](docs/toaststunt-llm-lab.md) and [Sindome account requirements](docs/sindome.md).
+
+To connect to two different MOOs, run a server instance for each with its own credentials and profile.
+
+For your own MOO commands or a different mix of tools, see [Custom configurations](#custom-configurations).
+
+### 3. Start the server and connect Codex
+
+Choose [Codex-launched stdio](#codex-launched-stdio) for a server Codex starts on demand. Choose [shared local HTTP](#shared-local-http) for one running server that multiple local clients can use.
+
+#### Codex-launched stdio
+
+Set `mcp-mode=stdio` in `.env` or leave it unset. Add this entry to `~/.codex/config.toml` and replace the example paths with the absolute path to your checkout.
+
+```toml
+[mcp_servers.moo]
+command = "node"
+args = ["/absolute/path/to/moo-mcp/src/index.js"]
+cwd = "/absolute/path/to/moo-mcp"
 ```
 
-By default, the server uses stdio. Configure your MCP client to launch `node /absolute/path/to/moo-mcp/src/index.js` with the repository as its working directory so `.env`, configuration, and logs resolve correctly.
+Codex launches the process from `cwd`, where the server reads `.env` and resolves your chosen profile. If Codex cannot find Node on its PATH, set `command` to the absolute path to the Node executable.
 
-For a shared local daemon, set these values in `.env`:
+#### Shared local HTTP
+
+Set these values in the server's `.env` file.
 
 ```ini
 mcp-mode=http_shared
@@ -29,25 +65,28 @@ mcp-http-host=127.0.0.1
 mcp-http-port=3000
 ```
 
-Point your MCP client at `http://127.0.0.1:3000/mcp`. HTTP mode permits only localhost addresses. All clients share the bot account's permissions and command queue. The sample `moo-mcp.conf` shows a Supervisor installation. Adapt its paths and Node executable before using it.
+Run `npm start` from the `moo-mcp` checkout and leave it running. Use this entry in `~/.codex/config.toml` for the shared server.
 
-## Optional tools configuration
+```toml
+[mcp_servers.moo]
+url = "http://127.0.0.1:3000/mcp"
+```
 
-Leave `moo-tools-config` unset for the two core tools. To add custom tools:
+The HTTP listener is loopback-only. Clients on the same host share the configured MOO account, tools, and command queue. To run it under Supervisor, adapt the paths in `moo-mcp.conf`.
+
+Start a new Codex session after saving its configuration and use `/mcp` in the Codex terminal UI to check the connection. See the [OpenAI Docs for Codex MCP configuration](https://developers.openai.com/codex/mcp).
+
+## Custom configurations
+
+Copy the example when you want to define your own tools.
 
 ```sh
 cp config/custom.tools.json.example config/local.tools.json
 ```
 
-Add this setting to `.env`:
+Point `moo-tools-config` at `config/local.tools.json` in `.env`. You can also set `MOO_TOOLS_CONFIG` when launching the server if `moo-tools-config` is unset. Relative paths resolve from the server's working directory.
 
-```ini
-moo-tools-config=config/local.tools.json
-```
-
-`MOO_TOOLS_CONFIG` is the equivalent environment variable. Relative configuration paths resolve from the process working directory. Configuration is read once at startup; restart the process and reconnect clients after changing it. Invalid configurations, duplicate tool names, or missing modules fail startup before connecting to the MOO.
-
-Custom `config/*.tools.json` files are ignored by Git. The shipped profiles and example templates are tracked. Keep credentials in `.env`.
+Configuration is read once at startup. Restart the server and reconnect clients after changing it. Invalid configurations, duplicate tool names, or missing modules fail startup before the server connects to the MOO. Git ignores custom `config/*.tools.json` files and tracks the shipped profiles and example templates.
 
 ### Define a tool without JavaScript
 
@@ -82,32 +121,6 @@ Command segments concatenate exactly, including spaces. Literal strings supply f
 - `response: "json"` expects the entire captured response to be plain JSON and returns that value. A truthy `error`, `ok: 0`, or `ok: false` marks a tool error. Capture failures or invalid JSON also return tool errors and retire the uncertain connection inside the queue. An eval response containing `=>` is not plain JSON; use text mode or a module to parse it.
 
 The example `search_catalog` assumes your MOO has `$catalog:search`; adapt it to your server. Configuration only describes client tools and does not install MOO verbs.
-
-### Select a shipped profile
-
-The two core tools are always available. Choose an optional profile for the MOO you are connecting to.
-
-| Profile | Configuration | Tools |
-| --- | --- | --- |
-| ToastStunt LLM Lab | `config/toaststunt-llm-lab.tools.json` | 14 tools for verb source, object and property inspection, and structured search over the installed `@mcp` feature |
-| Sindome | `config/sindome.tools.json` | 9 tools for bug triage, bug reports and comments, and traceback review |
-| Combined | `config/combined.tools.json` | Both sets plus the two core tools. Tool names stay the same |
-
-Set the path in `.env` and start or restart the MCP server.
-
-```ini
-moo-tools-config=config/toaststunt-llm-lab.tools.json
-```
-
-Alternatively, launch the server from the repository root with an environment variable. Leave `moo-tools-config` unset in `.env` when selecting the profile this way.
-
-```sh
-MOO_TOOLS_CONFIG=config/combined.tools.json npm start
-```
-
-Use the combined profile when the same MOO and account support both sets of commands. To connect to two worlds, launch two instances of `src/index.js` with separate credentials and profiles.
-
-The portable tools require the server-side `@mcp` feature. Run the [MOO installation transcript](https://github.com/SindomeCorp/toaststunt-llm-lab/blob/main/moo/install.moo) from [ToastStunt LLM Lab](https://github.com/SindomeCorp/toaststunt-llm-lab), or use its setup script to install the feature automatically on stock ToastCore. See the [lab profile notes](docs/toaststunt-llm-lab.md) for setup and call examples and the [Sindome notes](docs/sindome.md) for account and verb requirements.
 
 ### Combine configurations
 
