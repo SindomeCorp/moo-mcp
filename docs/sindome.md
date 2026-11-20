@@ -1,5 +1,7 @@
 # Sindome extension and operational notes
 
+See the [bug and traceback command reference](sindome-commands.md) and [compatibility command reference](sindome-compat-commands.md) for tool arguments, examples, and responses.
+
 These tools require Sindome-specific server verbs and response formats. Select a profile by setting `moo-tools-config` in `.env`.
 
 - `config/sindome.tools.json` adds bug and traceback tools.

@@ -27,11 +27,11 @@ Set `moo-tools-config` in `.env` to one of the paths below. Start with **Basic**
 
 | Profile | `moo-tools-config` value | What you can do |
 | --- | --- | --- |
-| **Basic** | Leave unset | Send MOO commands with `run_moo_command` and parse eval results with `run_moo_eval`. |
-| **ToastStunt LLM Lab** | `config/toaststunt-llm-lab.tools.json` | Read verb source, inspect objects and properties, and search the MOO. Requires the lab's `@mcp` feature. |
-| **Sindome** (optional) | `config/sindome.tools.json` | Review bugs and tracebacks, file bug reports, and post bug comments on a Sindome MOO. |
-| **Sindome compatibility** | `config/sindome-compat.tools.json` | Use the 24-tool Sindome catalog expected by existing integrations, including native object inspection, verb source, and search. |
-| **Combined** | `config/combined.tools.json` | Use the lab and Sindome tools on one MOO and account that support both sets. |
+| [**Basic**](docs/default-commands.md) | Leave unset | Send MOO commands with `run_moo_command` and parse eval results with `run_moo_eval`. |
+| [**ToastStunt LLM Lab**](docs/toaststunt-llm-lab-commands.md) | `config/toaststunt-llm-lab.tools.json` | Read verb source, inspect objects and properties, and search the MOO. Requires the lab's `@mcp` feature. |
+| [**Sindome**](docs/sindome-commands.md) (optional) | `config/sindome.tools.json` | Review bugs and tracebacks, file bug reports, and post bug comments on a Sindome MOO. |
+| [**Sindome compatibility**](docs/sindome-compat-commands.md) | `config/sindome-compat.tools.json` | Use the 24-tool Sindome catalog expected by existing integrations, including native object inspection, verb source, and search. |
+| **Combined** | `config/combined.tools.json` | Use the [lab tools](docs/toaststunt-llm-lab-commands.md) and [Sindome tools](docs/sindome-commands.md), plus the [default tools](docs/default-commands.md), on one MOO and account that support both sets. |
 
 For example, to enable the lab tools, set `moo-tools-config=config/toaststunt-llm-lab.tools.json`. The basic tools are available with every profile. Try `run_moo_command` with `{"command":"look"}`. If the account can eval, try `run_moo_eval` with `{"eval":";2 + 2"}`.
 
