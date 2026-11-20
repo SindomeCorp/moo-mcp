@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "includes": ["sindome.tools.json"],
+  "modules": ["../extensions/sindome-compat.js"]
+}

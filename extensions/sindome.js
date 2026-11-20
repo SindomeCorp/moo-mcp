@@ -4,11 +4,11 @@ import { parseEvalOutput } from "../src/core-tools.js";
 
 const LIST_TIMEOUT_MS = 15000;
 
-function truncateResponse(rawOutput) {
+export function truncateResponse(rawOutput) {
   return String(rawOutput ?? "").slice(0, 500);
 }
 
-function parseJsonObjectOutput(rawOutput) {
+export function parseJsonObjectOutput(rawOutput) {
   const normalized = sanitizeJsonText(rawOutput);
   const extracted = extractFirstJsonObjectText(normalized);
   const candidates = [normalized];
@@ -153,7 +153,7 @@ function extractFirstJsonObjectText(text) {
   return null;
 }
 
-function sanitizeJsonText(rawOutput) {
+export function sanitizeJsonText(rawOutput) {
   const ansiPattern =
     /(?:\u001B\[|\u009B)[0-?]*[ -/]*[@-~]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g;
   const escParenTerminalCodePattern = /\u001B\([^)]*\)/g;

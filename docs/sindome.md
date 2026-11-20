@@ -1,6 +1,12 @@
 # Sindome extension and operational notes
 
-These tools require Sindome-specific server verbs and response formats. Enable them with `moo-tools-config=config/sindome.tools.json`. This profile provides nine Sindome bug and traceback tools plus the two core tools. Use the combined profile for object inspection, verb source, and search after attaching the portable `@mcp` feature to the account. Profiles do not install server-side verbs.
+These tools require Sindome-specific server verbs and response formats. Select a profile by setting `moo-tools-config` in `.env`.
+
+- `config/sindome.tools.json` adds bug and traceback tools.
+- `config/sindome-compat.tools.json` adds the native inspection, source, and search commands used by clients of the 24-tool Sindome interface. For example, `show-json` takes `{"arg":"$time_utils"}` and `verb-data` takes an `arg` in `obj:verb` form. This profile needs no portable feature. To set the timeout for `run_moo_code_search` and `prop-search`, use `moo-code-search-timeout-ms` or `MOO_CODE_SEARCH_TIMEOUT_MS`. The default is 15000 ms.
+- `config/combined.tools.json` adds portable inspection, source, and search to the bug and traceback tools. Those portable tools require the MOO-side `@mcp` feature and use their own arguments and responses.
+
+Each profile includes the two core tools. Select one profile for each MCP process. The compatibility and portable profiles share tool names.
 
 The programming and VMS preservation rules below apply to this extension. Core raw command/eval tools use generic descriptions; callers using those tools for Sindome edits must still follow these rules.
 
@@ -153,10 +159,12 @@ documentation/readability-only edits:
 
 1. Capture the full original source before editing, including every bottom
    `VMS NOTE` string, `VMS VERSION`, and `Last modified` annotation. Prefer
-   `verb-data` from the combined profile and verify `source.code_lines` includes
-   the stored annotations. An annotated listing may present a `VMS NOTES` heading
-   outside the program. If annotations are missing or conflicting, stop and
-   reconcile before programming.
+   `verb-data` and verify the stored annotations. Read `verb_info.source.code_lines`
+   with the compatibility profile or `source.code_lines` with the combined
+   profile. The compatibility profile's `get_moo_verb_source` returns
+   `source_code` and `vms_notes` separately. An annotated listing may place the
+   `VMS NOTES` heading outside the program. If annotations are missing or
+   conflicting, stop and reconcile before programming.
 2. Edit only the intended body. Retain all existing bottom annotations verbatim
    as input to every full-source upload. Never assume save reconstructs omitted
    history: `$vms2:comment_code` uses the submitted version/history, and a missing

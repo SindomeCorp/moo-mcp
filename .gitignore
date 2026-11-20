@@ -32,6 +32,7 @@ out/
 .env
 config/*.tools.json
 !config/sindome.tools.json
+!config/sindome-compat.tools.json
 !config/toaststunt-llm-lab.tools.json
 !config/combined.tools.json
 .env.*

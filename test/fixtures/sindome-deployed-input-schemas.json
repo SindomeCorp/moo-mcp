@@ -1,0 +1,412 @@
+{
+  "bugs-json": {
+    "additionalProperties": false,
+    "properties": {
+      "arg": {
+        "description": "Optional: one of `new`, `unassigned`, `assigned`, `resolved`, `mine`, or a search string (minimum 3 characters). Omit for open unresolved bugs.",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "contents": {
+    "additionalProperties": false,
+    "properties": {
+      "arg": {
+        "description": "Object reference in the format `#1234` or `$cored_ref` (for example `#15840` or `$string_utils`).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "arg"
+    ],
+    "type": "object"
+  },
+  "cored_json": {
+    "additionalProperties": false,
+    "properties": {
+      "arg": {
+        "description": "Optional argument string. When omitted or empty, runs `@cored-json`.",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "defines_prop_json": {
+    "additionalProperties": false,
+    "properties": {
+      "arg": {
+        "description": "Property name to search for. When omitted or empty, runs `@defines-prop-json` to preserve verb-side usage errors.",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "defines_verb_json": {
+    "additionalProperties": false,
+    "properties": {
+      "arg": {
+        "description": "Verb name to search for. When omitted or empty, runs `@defines-verb-json` to preserve verb-side usage errors.",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "get-next-unreviewed-bug": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  },
+  "get_moo_verb_source": {
+    "additionalProperties": false,
+    "properties": {
+      "object": {
+        "description": "Cored object ref like `$string_utils` or object id like `#1234`.",
+        "type": "string"
+      },
+      "verb": {
+        "description": "Verb name as any non-empty string.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "object",
+      "verb"
+    ],
+    "type": "object"
+  },
+  "location": {
+    "additionalProperties": false,
+    "properties": {
+      "arg": {
+        "description": "Object reference in the format `#1234` or `$cored_ref` (for example `#15840` or `$string_utils`).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "arg"
+    ],
+    "type": "object"
+  },
+  "next-unreviewed-traceback-json": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  },
+  "prop-search": {
+    "additionalProperties": false,
+    "properties": {
+      "count_only": {
+        "description": "Optional flag; only accepted value is `true`, sent as `--count_only=true`.",
+        "type": "boolean"
+      },
+      "include_descendants": {
+        "description": "Optional flag; only accepted value is `true`, and it can only be used with `scope`.",
+        "type": "boolean"
+      },
+      "match_type": {
+        "description": "Optional match type. Allowed values: `simple` (default) or `regex`; sent as `--match_type=<value>`.",
+        "type": "string"
+      },
+      "max_matches": {
+        "description": "Optional maximum match count. Must be an integer greater than 0; sent as `--max_matches=<integer>`.",
+        "type": "integer"
+      },
+      "pattern": {
+        "description": "Pattern text to search with @prop-grep-json.",
+        "type": "string"
+      },
+      "scope": {
+        "description": "Required scope target like `#98` or `$su`, sent as `--scope=<value>`.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "pattern",
+      "scope"
+    ],
+    "type": "object"
+  },
+  "props-json": {
+    "additionalProperties": false,
+    "properties": {
+      "arg": {
+        "description": "Object reference in the format `#1234` or `$cored_ref` (for example `#15840` or `$string_utils`).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "arg"
+    ],
+    "type": "object"
+  },
+  "resolve-traceback": {
+    "additionalProperties": false,
+    "properties": {
+      "id": {
+        "description": "Traceback id as an integer.",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "type": "object"
+  },
+  "run_moo_code_search": {
+    "additionalProperties": false,
+    "properties": {
+      "count_only": {
+        "description": "Optional flag; only accepted value is `true`, sent as `--count_only=true`.",
+        "type": "boolean"
+      },
+      "include_descendants": {
+        "description": "Optional flag; only accepted value is `true`, and it can only be used with `scope`.",
+        "type": "boolean"
+      },
+      "match_type": {
+        "description": "Optional match type. Allowed values: `simple` (default) or `regex`; sent as `--match_type=<value>`.",
+        "type": "string"
+      },
+      "max_matches": {
+        "description": "Optional maximum match count. Must be an integer greater than 0; sent as `--max_matches=<integer>`.",
+        "type": "integer"
+      },
+      "pattern": {
+        "description": "Pattern text to search with @code-search.",
+        "type": "string"
+      },
+      "scope": {
+        "description": "Optional scope target like `#98` or `$su`, sent as `--scope=<value>`.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "pattern"
+    ],
+    "type": "object"
+  },
+  "run_moo_command": {
+    "additionalProperties": false,
+    "properties": {
+      "command": {
+        "description": "Raw command to send to MOO.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "command"
+    ],
+    "type": "object"
+  },
+  "run_moo_eval": {
+    "additionalProperties": false,
+    "properties": {
+      "eval": {
+        "description": "Raw eval command to send to MOO, typically starting with `;`.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "eval"
+    ],
+    "type": "object"
+  },
+  "search-json": {
+    "additionalProperties": false,
+    "properties": {
+      "extra_filters": {
+        "description": "Optional additional filter tokens appended as-is.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "generics_only": {
+        "description": "Optional flag; when true appends `-g`.",
+        "type": "boolean"
+      },
+      "help": {
+        "description": "When true, runs `@search-json --help`.",
+        "type": "boolean"
+      },
+      "limit": {
+        "description": "Optional positive integer limit, sent as `limit=<value>`.",
+        "type": "integer"
+      },
+      "location": {
+        "description": "Optional location filter, sent as `l=<value>`.",
+        "type": "string"
+      },
+      "mementos_only": {
+        "description": "Optional flag; when true appends `-m`.",
+        "type": "boolean"
+      },
+      "moved_by": {
+        "description": "Optional moved-by filter, sent as `w=<value>`.",
+        "type": "string"
+      },
+      "mutex": {
+        "description": "Optional mutex filter, sent as `mutex=<value>`.",
+        "type": "string"
+      },
+      "name": {
+        "description": "Optional name filter, sent as `n=<value>`.",
+        "type": "string"
+      },
+      "parent": {
+        "description": "Optional parent filter, sent as `p=<value>`.",
+        "type": "string"
+      },
+      "prop": {
+        "description": "Optional property filter, sent as `prop=<value>`.",
+        "type": "string"
+      },
+      "sic": {
+        "description": "Optional SIC filter, sent as `a=<value>`.",
+        "type": "string"
+      },
+      "type": {
+        "description": "Search type when `help` is not true. Canonical values: `rooms`, `exits`, `npcs`, `players`, `players-all`, `avatars`, `vehicles`, `jobs`, `attacks`, `channels`, `wares`, `things`.",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "show-json": {
+    "additionalProperties": false,
+    "properties": {
+      "arg": {
+        "description": "Object reference in the format `#1234` or `$cored_ref` (for example `#15840` or `$slither`).",
+        "type": "string"
+      },
+      "property": {
+        "description": "Optional property name to append as `<arg>.<property>` when calling `@show-json`.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "arg"
+    ],
+    "type": "object"
+  },
+  "submit_bug": {
+    "additionalProperties": false,
+    "properties": {
+      "body": {
+        "description": "Required body as either a string or an array of strings.",
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        ]
+      },
+      "subject": {
+        "description": "Required non-empty subject string (max 255 characters).",
+        "maxLength": 255,
+        "type": "string"
+      },
+      "traceback_json_text": {
+        "description": "Optional JSON text string for traceback data. Must be valid JSON; multi-line input is accepted and normalized to a single-line JSON string.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "subject",
+      "body"
+    ],
+    "type": "object"
+  },
+  "submit_bug_comment": {
+    "additionalProperties": false,
+    "properties": {
+      "bug_id": {
+        "description": "Bug id as a positive integer.",
+        "type": "integer"
+      },
+      "comment": {
+        "description": "Comment text. Newlines are preserved and converted into a MOO list of strings.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "bug_id",
+      "comment"
+    ],
+    "type": "object"
+  },
+  "update-llm-reviewed-timestamp": {
+    "additionalProperties": false,
+    "properties": {
+      "traceback_id": {
+        "description": "Traceback id as a positive integer.",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "traceback_id"
+    ],
+    "type": "object"
+  },
+  "vb-json": {
+    "additionalProperties": false,
+    "properties": {
+      "arg": {
+        "description": "Bug id as a positive integer (for example `12345`) or the string `last` for the last viewed bug.",
+        "type": [
+          "integer",
+          "string"
+        ]
+      }
+    },
+    "required": [
+      "arg"
+    ],
+    "type": "object"
+  },
+  "verb-data": {
+    "additionalProperties": false,
+    "properties": {
+      "arg": {
+        "description": "Required format: `obj:verb_spec` where obj is `#1234` or `$cored_ref`, separator is `:` or `::`, and `verb_spec` is any non-empty string (e.g. `#22664:foo`, `#24608:@asdf`, or `#24608::\"_asdf\"`).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "arg"
+    ],
+    "type": "object"
+  },
+  "verbs-json": {
+    "additionalProperties": false,
+    "properties": {
+      "arg": {
+        "description": "Object reference in the format `#1234` or `$cored_ref` (for example `#15840` or `$string_utils`).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "arg"
+    ],
+    "type": "object"
+  },
+  "view-traceback-json": {
+    "additionalProperties": false,
+    "properties": {
+      "traceback_id": {
+        "description": "Traceback id as a positive integer.",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "traceback_id"
+    ],
+    "type": "object"
+  }
+}

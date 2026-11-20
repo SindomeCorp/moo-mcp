@@ -28,11 +28,14 @@ Set `moo-tools-config` in `.env` to one of the paths below. Start with **Basic**
 | **Basic** | Leave unset | Send MOO commands with `run_moo_command` and parse eval results with `run_moo_eval`. |
 | **ToastStunt LLM Lab** | `config/toaststunt-llm-lab.tools.json` | Read verb source, inspect objects and properties, and search the MOO. Requires the lab's `@mcp` feature. |
 | **Sindome** (optional) | `config/sindome.tools.json` | Review bugs and tracebacks, file bug reports, and post bug comments on a Sindome MOO. |
+| **Sindome compatibility** | `config/sindome-compat.tools.json` | Use the 24-tool Sindome catalog expected by existing integrations, including native object inspection, verb source, and search. |
 | **Combined** | `config/combined.tools.json` | Use the lab and Sindome tools on one MOO and account that support both sets. |
 
 For example, to enable the lab tools, set `moo-tools-config=config/toaststunt-llm-lab.tools.json`. The basic tools are available with every profile. Try `run_moo_command` with `{"command":"look"}`. If the account can eval, try `run_moo_eval` with `{"eval":";2 + 2"}`.
 
 For the lab profile, attach the server-side feature to the programmer account using the [MOO installation transcript](https://github.com/SindomeCorp/toaststunt-llm-lab/blob/main/moo/install.moo). The [ToastStunt LLM Lab setup](https://github.com/SindomeCorp/toaststunt-llm-lab) installs that feature automatically when provisioning stock ToastCore. Once connected, call `hello` to verify it, or try `verb-data` to read a verb. See the [lab tool examples](docs/toaststunt-llm-lab.md) and [Sindome account requirements](docs/sindome.md).
+
+For an existing client that sends `show-json` an `arg` or expects Sindome VMS source output, choose **Sindome compatibility**. It uses the native Sindome commands and needs no portable feature.
 
 To connect to two different MOOs, run a server instance for each with its own credentials and profile.
 
