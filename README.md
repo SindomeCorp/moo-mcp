@@ -1,6 +1,8 @@
 # MOO MCP
 
-An extensible MCP server connecting AI tools to a MOO over telnet. It supports a spawned stdio process or a localhost HTTP daemon shared by multiple clients, using one connection and command queue.
+An extensible MCP server connecting AI tools to a MOO over telnet. This was designed for [Sindome](https://www.sindome.org/) and ToastStunt but you can use it for any MOO. The ToastStunt LLM Lab configuration is a great starting point but it requires [installing](https://github.com/SindomeCorp/toaststunt-llm-lab/blob/main/moo/install.moo) the ToastStunt LLM Lab verb code before the extended MCP toolset will work.
+
+MOO MCP supports a spawned stdio process attached to a single agent, or a localhost HTTP daemon shared by multiple clients, using one connection and command queue.
 
 The default tools are `run_moo_command` and `run_moo_eval`. Optional configuration adds your own tools or loads a shipped tool profile.
 
