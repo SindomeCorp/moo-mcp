@@ -101,6 +101,66 @@ test("compatibility profile preserves legacy routing and responses for the 13 to
   assert.deepEqual(context.calls[11].slice(2), [40, 100, 1500]);
 });
 
+for (const [tool, command] of [
+  ["defines_verb_json", "@defines-verb-json"],
+  ["defines_prop_json", "@defines-prop-json"]
+]) {
+  test(`${tool} forwards wildcard patterns intact and preserves matches`, async () => {
+    const patterns = ["@done-*", "*-pull", "SQL_EVENT_*", "wildfixture name [1].*",
+      "wild*fixture*", 'wildfixture  name [1]."quoted"\\*'];
+    const context = fixture(Object.fromEntries(patterns.map(query => [`${command} ${query}`, {
+      query, result_count: 2, results: [
+        { obj: "#42", name: "Fixture", owner: "#1", parent: "#2",
+          matches: ["@done-pull full-alias", "wildfixture name [1].value"] },
+        { obj: "#43", name: "Second fixture", owner: "#1", parent: "#2", matches: [] }
+      ]
+    }])));
+    const registry = await loadToolRegistry({ configPath: profile("sindome-compat"), context });
+    for (const query of patterns) {
+      const result = await success(registry, tool, { arg: `  ${query}  ` });
+      assert.deepEqual(result, {
+        query, result_count: 2, results: [
+          { obj: "#42", name: "Fixture", owner: "#1", parent: "#2",
+            matches: ["@done-pull full-alias", "wildfixture name [1].value"] },
+          { obj: "#43", name: "Second fixture", owner: "#1", parent: "#2", matches: [] }
+        ]
+      });
+    }
+    assert.deepEqual(context.calls, patterns.map(query => ["idle", `${command} ${query}`, 40, 100]));
+  });
+
+  test(`${tool} accepts exact and older wildcard responses without matches`, async () => {
+    for (const query of ["exact name [1].value", "older_*"]) {
+      const response = { query, result_count: 1,
+        results: [{ obj: "#42", name: "Fixture", owner: "#1", parent: "#2" }] };
+      const context = fixture({ [`${command} ${query}`]: response });
+      const registry = await loadToolRegistry({ configPath: profile("sindome-compat"), context });
+      assert.deepEqual(await success(registry, tool, { arg: query }), response);
+      assert.equal(Object.hasOwn(response.results[0], "matches"), false);
+      assert.deepEqual(context.calls, [["idle", `${command} ${query}`, 40, 100]]);
+    }
+  });
+
+  test(`${tool} rejects controls and multiline input before connection or dispatch`, async () => {
+    const context = fixture();
+    let connections = 0;
+    context.mooSession.ensureConnectedAndLoggedIn = async () => { connections++; };
+    const registry = await loadToolRegistry({ configPath: profile("sindome-compat"), context });
+    const controls = Array.from({ length: 32 }, (_, index) => String.fromCharCode(index))
+      .concat(Array.from({ length: 33 }, (_, index) => String.fromCharCode(127 + index)),
+        ["\u2028", "\u2029", "\r\n"]);
+    for (const control of controls) {
+      for (const arg of [`${control}fixture*`, `fixture${control}*`, `fixture*${control}`]) {
+        const result = await call(registry, tool, { arg });
+        assert.equal(result.isError, true, JSON.stringify(arg));
+        assert.match(payload(result).error, /control characters or line separators/);
+      }
+    }
+    assert.equal(connections, 0);
+    assert.deepEqual(context.calls, []);
+  });
+}
+
 test("legacy validation and error shapes remain distinct", async () => {
   const context = fixture({
     "@list #42:missing": "That object does not define that verb.",

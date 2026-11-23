@@ -319,13 +319,13 @@ export function createTools({ config, mooSession, logger: baseLogger }) {
     },
     {
       "name": "defines_verb_json",
-      "description": "Runs @defines-verb-json with an optional arg and returns the parsed JSON object.",
+      "description": "Runs @defines-verb-json with an optional name pattern. The MOO matches * anywhere in the pattern; the connector preserves punctuation and internal spaces and trims outer whitespace. Rejects control characters and line separators. Returns query, result_count, and results unchanged, including optional matches arrays of full matching names.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "arg": {
             "type": "string",
-            "description": "Verb name to search for. When omitted or empty, runs `@defines-verb-json` to preserve verb-side usage errors."
+            "description": "Verb name or wildcard pattern, for example `@done-*` or `*-pull`. * is supported anywhere; matching is handled by the MOO. Internal spaces and punctuation are preserved, outer whitespace is trimmed, and control characters and line separators are rejected. When omitted or empty, runs `@defines-verb-json` to preserve verb-side usage errors."
           }
         },
         "additionalProperties": false
@@ -333,13 +333,13 @@ export function createTools({ config, mooSession, logger: baseLogger }) {
     },
     {
       "name": "defines_prop_json",
-      "description": "Runs @defines-prop-json with an optional arg and returns the parsed JSON object.",
+      "description": "Runs @defines-prop-json with an optional name pattern. The MOO matches * anywhere in the pattern; the connector preserves punctuation and internal spaces and trims outer whitespace. Rejects control characters and line separators. Returns query, result_count, and results unchanged, including optional matches arrays of full matching names.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "arg": {
             "type": "string",
-            "description": "Property name to search for. When omitted or empty, runs `@defines-prop-json` to preserve verb-side usage errors."
+            "description": "Property name or wildcard pattern, for example `SQL_EVENT_*` or `wildfixture name [1].*`. * is supported anywhere; matching is handled by the MOO. Internal spaces and punctuation are preserved, outer whitespace is trimmed, and control characters and line separators are rejected. When omitted or empty, runs `@defines-prop-json` to preserve verb-side usage errors."
           }
         },
         "additionalProperties": false
@@ -1021,6 +1021,16 @@ export function createTools({ config, mooSession, logger: baseLogger }) {
         };
       }
 
+      // Validate before trimming so trailing newlines cannot be hidden.
+      if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(argRaw ?? "")) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: JSON.stringify({
+            error: "`arg` must not contain control characters or line separators."
+          }) }]
+        };
+      }
+
       const arg = String(argRaw ?? "").trim();
       const command = arg ? `@defines-verb-json ${arg}` : "@defines-verb-json";
 
@@ -1167,6 +1177,16 @@ export function createTools({ config, mooSession, logger: baseLogger }) {
               text: JSON.stringify(result, null, 2)
             }
           ]
+        };
+      }
+
+      // Validate before trimming so trailing newlines cannot be hidden.
+      if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(argRaw ?? "")) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: JSON.stringify({
+            error: "`arg` must not contain control characters or line separators."
+          }) }]
         };
       }
 

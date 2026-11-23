@@ -36,7 +36,7 @@
     "additionalProperties": false,
     "properties": {
       "arg": {
-        "description": "Property name to search for. When omitted or empty, runs `@defines-prop-json` to preserve verb-side usage errors.",
+        "description": "Property name or wildcard pattern, for example `SQL_EVENT_*` or `wildfixture name [1].*`. * is supported anywhere; matching is handled by the MOO. Internal spaces and punctuation are preserved, outer whitespace is trimmed, and control characters and line separators are rejected. When omitted or empty, runs `@defines-prop-json` to preserve verb-side usage errors.",
         "type": "string"
       }
     },
@@ -46,7 +46,7 @@
     "additionalProperties": false,
     "properties": {
       "arg": {
-        "description": "Verb name to search for. When omitted or empty, runs `@defines-verb-json` to preserve verb-side usage errors.",
+        "description": "Verb name or wildcard pattern, for example `@done-*` or `*-pull`. * is supported anywhere; matching is handled by the MOO. Internal spaces and punctuation are preserved, outer whitespace is trimmed, and control characters and line separators are rejected. When omitted or empty, runs `@defines-verb-json` to preserve verb-side usage errors.",
         "type": "string"
       }
     },

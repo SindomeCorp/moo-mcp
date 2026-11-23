@@ -20,8 +20,8 @@ Examples below are JSON argument objects passed to the named MCP tool. Unknown a
 | `location` | `arg` (object reference string) | None | `@location-json ARG` | `{"arg":"#1234"}` |
 | `show-json` | `arg` (object reference string) | `property` (string) | `@show-json ARG` or `@show-json ARG.PROPERTY` | `{"arg":"$time_utils"}` |
 | `cored_json` | None | `arg` (string) | `@cored-json [ARG]` | `{}` |
-| `defines_verb_json` | None | `arg` (string containing a verb name) | `@defines-verb-json [ARG]` | `{"arg":"look"}` |
-| `defines_prop_json` | None | `arg` (string containing a property name) | `@defines-prop-json [ARG]` | `{"arg":"description"}` |
+| `defines_verb_json` | None | `arg` (exact verb name or wildcard pattern) | `@defines-verb-json [ARG]` | `{"arg":"@done-*"}` |
+| `defines_prop_json` | None | `arg` (exact property name or wildcard pattern) | `@defines-prop-json [ARG]` | `{"arg":"SQL_EVENT_*"}` |
 
 Omitting `arg` for a definition lookup sends the command without an argument, preserving the server-side usage error. `show-json` takes the object in `arg` and the property separately, for example `{"arg":"#1234","property":"name"}`.
 
@@ -30,6 +30,27 @@ Omitting `arg` for a definition lookup sends the command without an argument, pr
 `verb-data` returns `{"error":false,"arg":"...","verb_info":{...}}`, enriching `verb_info.source.code` from `verb_info.source.code_lines` when present. Its `arg` accepts `:` or `::` separators and non-empty verb specifications, including quoted names, such as `{"arg":"#1234::\"_example\""}`.
 
 The other inspection tools return the parsed JSON object from the MOO. Preserve all existing bottom `VMS NOTE`, `VMS VERSION`, and `Last modified` annotations before editing. Follow the full [Sindome verb editing instructions](sindome.md#agent-instructions-for-verb-edits), including readback after saving.
+
+## Definition lookup patterns and responses
+
+Both definition lookups accept `*` anywhere in a name pattern. The MOO performs the matching. Example MCP calls:
+
+```javascript
+defines_verb_json({ "arg": "@done-*" })
+defines_verb_json({ "arg": "*-pull" })
+defines_prop_json({ "arg": "SQL_EVENT_*" })
+defines_prop_json({ "arg": "wildfixture name [1].*" })
+```
+
+The connector forwards the entire pattern as one command argument string, preserving asterisks, punctuation, and internal spaces. It trims outer whitespace. Do not add command quotes around the pattern. Control characters (including CR, LF, NUL, and tabs) and Unicode line separators are rejected before connecting or dispatching a command, including when they appear in outer whitespace.
+
+Responses retain `query`, `result_count`, and `results`. Each result has `obj`, `name`, `owner`, and `parent`. Wildcard results may additionally contain a `matches` array of matching full verb aliases or property names; the connector preserves that array unchanged. For example:
+
+```json
+{"query":"SQL_EVENT_*","result_count":1,"results":[{"obj":"#1234","name":"Example object","owner":"#42","parent":"#1","matches":["SQL_EVENT_CREATED","SQL_EVENT_UPDATED"]}]}
+```
+
+Exact lookups and older MOO servers may omit `matches`; those responses remain supported. This wildcard contract applies to the native Sindome compatibility tools.
 
 ## `search-json`
 
